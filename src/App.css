@@ -1,0 +1,99 @@
+/* ===== App Layout Styles ===== */
+.app {
+  display: flex;
+  min-height: 100vh;
+}
+
+.app__main {
+  flex: 1;
+  margin-left: 260px;
+  padding: var(--space-8);
+  min-height: 100vh;
+  transition: margin-left var(--transition-normal);
+}
+
+/* Search View */
+.app__search-view {
+  display: flex;
+  flex-direction: column;
+  min-height: calc(100vh - var(--space-16));
+}
+
+/* Search Header — 검색 화면 최상단에 항상 고정된 검색창 */
+.app__search-header {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-6) 0 var(--space-6);
+  transition: padding var(--transition-slow);
+}
+
+.app__search-header--compact {
+  padding: var(--space-2) 0 var(--space-4);
+}
+
+/* Search Query Info */
+.app__search-query-info {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.app__search-query-label {
+  font-size: 0.82rem;
+  color: var(--text-tertiary);
+}
+
+.app__search-query-text {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--accent-secondary);
+}
+
+/* Results */
+.app__results {
+  display: grid;
+  grid-template-columns: 1fr 420px;
+  gap: var(--space-6);
+  flex: 1;
+  min-height: 0;
+}
+
+.app__results-left {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.app__results-right {
+  position: sticky;
+  top: var(--space-8);
+  height: fit-content;
+  max-height: calc(100vh - var(--space-16));
+  overflow: hidden;
+  padding: var(--space-5);
+}
+
+/* Responsive */
+@media (max-width: 1200px) {
+  .app__results {
+    grid-template-columns: 1fr;
+  }
+
+  .app__results-right {
+    position: static;
+    max-height: none;
+  }
+}
+
+@media (max-width: 768px) {
+  .app__main {
+    margin-left: 72px;
+    padding: var(--space-4);
+  }
+
+  .app__search-header {
+    padding: 0 0 var(--space-4);
+  }
+}

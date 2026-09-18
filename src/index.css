@@ -1,0 +1,267 @@
+/* ===== DESIGN SYSTEM — Topic Thread AI ===== */
+
+/* --- CSS Custom Properties --- */
+:root {
+  /* Color Palette — Notion-inspired, light-first (따뜻한 오프화이트 캔버스 + 짙은 잉크) */
+  --bg-primary: #f6f5f4;
+  --bg-secondary: #ffffff;
+  --bg-tertiary: #f0efec;
+  --bg-elevated: #ffffff;
+  --bg-glass: #ffffff;
+  --bg-glass-hover: #fbfbfa;
+
+  /* Accent Colors */
+  --accent-primary: #0075de;
+  --accent-primary-rgb: 0, 117, 222;
+  /* 밝은 하늘색(#62aef0)은 흰 배경 위 텍스트로 쓰면 대비가 부족해서, hover/강조 텍스트용으로는
+     더 짙은 블루를 쓴다 — 장식용(그라디언트 등) 밝은 톤은 각 사용처에서 직접 hex로 씀 */
+  --accent-secondary: #005bab;
+  --accent-glow: rgba(0, 117, 222, 0.12);
+  --accent-gradient: linear-gradient(135deg, #0075de 0%, #62aef0 100%);
+  --accent-gradient-hover: linear-gradient(135deg, #1d84e3 0%, #7dbcf2 100%);
+
+  /* Source Colors */
+  --notion-color: #000000;
+  --notion-bg: rgba(0, 0, 0, 0.06);
+  --slack-color: #e01e5a;
+  --slack-bg: rgba(224, 30, 90, 0.10);
+  --gdrive-color: #34a853;
+  --gdrive-bg: rgba(52, 168, 83, 0.10);
+  --jira-color: #0052cc;
+  --jira-bg: rgba(0, 82, 204, 0.10);
+  --github-color: #1b1f24;
+  --github-bg: rgba(27, 31, 36, 0.06);
+  --gitlab-color: #e24329;
+  --gitlab-bg: rgba(226, 67, 41, 0.10);
+
+  /* Status Colors */
+  --success: #10b981;
+  --success-bg: rgba(16, 185, 129, 0.12);
+  --warning: #d97706;
+  --warning-bg: rgba(217, 119, 6, 0.12);
+  --danger: #dc2626;
+  --danger-bg: rgba(220, 38, 38, 0.12);
+  --info: #0075de;
+  --info-bg: rgba(0, 117, 222, 0.10);
+
+  /* Text Colors */
+  --text-primary: #191919;
+  --text-secondary: #615d59;
+  --text-tertiary: #a39e98;
+  --text-accent: #0075de;
+  --text-inverse: #ffffff;
+
+  /* Border & Divider */
+  --border-subtle: rgba(0, 0, 0, 0.08);
+  --border-default: rgba(0, 0, 0, 0.12);
+  --border-hover: rgba(0, 0, 0, 0.18);
+  --border-active: rgba(0, 117, 222, 0.4);
+
+  /* Shadows — Notion식 "겹겹이 얕은" 그림자, 무거운 드롭섀도우/글로우 대신 */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.08), 0 2px 6px rgba(0, 0, 0, 0.04);
+  --shadow-glow: 0 0 0 3px rgba(0, 117, 222, 0.12);
+  --shadow-glow-strong: 0 0 0 4px rgba(0, 117, 222, 0.16);
+
+  /* Typography */
+  --font-sans: 'Inter', 'Noto Sans KR', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+
+  /* Spacing Scale */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+
+  /* Border Radius */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-full: 9999px;
+  
+  /* Transitions */
+  --transition-fast: 150ms cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-normal: 250ms cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-slow: 400ms cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-spring: 500ms cubic-bezier(0.34, 1.56, 0.64, 1);
+  
+  /* Z-index Scale */
+  --z-dropdown: 100;
+  --z-sticky: 200;
+  --z-modal: 300;
+  --z-toast: 400;
+}
+
+/* --- Global Reset & Base Styles --- */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  font-size: 16px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  scroll-behavior: smooth;
+}
+
+body {
+  font-family: var(--font-sans);
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  line-height: 1.6;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+/* Scrollbar Styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--text-tertiary);
+  border-radius: var(--radius-full);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-secondary);
+}
+
+/* Selection */
+::selection {
+  background: rgba(0, 117, 222, 0.18);
+  color: var(--text-primary);
+}
+
+a {
+  color: var(--text-accent);
+  text-decoration: none;
+  transition: color var(--transition-fast);
+}
+a:hover {
+  color: var(--accent-secondary);
+}
+
+/* --- Utility Classes --- */
+.glass-panel {
+  background: var(--bg-glass);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+}
+
+.glass-panel-hover {
+  transition: all var(--transition-normal);
+}
+.glass-panel-hover:hover {
+  background: var(--bg-glass-hover);
+  border-color: var(--border-hover);
+  box-shadow: var(--shadow-md);
+}
+
+.gradient-text {
+  color: var(--text-primary);
+  font-weight: 700;
+}
+
+/* Animations */
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slideInLeft {
+  from {
+    opacity: 0;
+    transform: translateX(-20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes slideInRight {
+  from {
+    opacity: 0;
+    transform: translateX(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+@keyframes shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
+@keyframes float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-6px); }
+}
+
+@keyframes typing {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+@keyframes ripple {
+  0% { transform: scale(0); opacity: 0.5; }
+  100% { transform: scale(4); opacity: 0; }
+}
+
+.animate-fade-in-up {
+  animation: fadeInUp 0.5s ease-out both;
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.4s ease-out both;
+}
+
+.animate-slide-left {
+  animation: slideInLeft 0.4s ease-out both;
+}
+
+.animate-slide-right {
+  animation: slideInRight 0.4s ease-out both;
+}
+
+/* Staggered animation delays */
+.delay-1 { animation-delay: 0.05s; }
+.delay-2 { animation-delay: 0.1s; }
+.delay-3 { animation-delay: 0.15s; }
+.delay-4 { animation-delay: 0.2s; }
+.delay-5 { animation-delay: 0.25s; }
+.delay-6 { animation-delay: 0.3s; }
+.delay-7 { animation-delay: 0.35s; }
+.delay-8 { animation-delay: 0.4s; }

@@ -1,0 +1,247 @@
+/* ===== Sidebar Styles ===== */
+.sidebar {
+  width: 260px;
+  height: 100vh;
+  position: fixed;
+  left: 0;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border-subtle);
+  padding: var(--space-4);
+  z-index: var(--z-sticky);
+  transition: width var(--transition-normal);
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.sidebar--collapsed {
+  width: 72px;
+  align-items: center;
+}
+
+/* 접힌 상태에서는 라벨 텍스트가 없어져서 아이콘만 남는데, 기본 레이아웃(justify-content: flex-start)
+   그대로 두면 왼쪽으로 쏠려 보여서 가운데 정렬로 바꾼다. */
+.sidebar--collapsed .sidebar__logo,
+.sidebar--collapsed .sidebar__nav-item,
+.sidebar--collapsed .sidebar__user {
+  justify-content: center;
+  padding-left: 0;
+  padding-right: 0;
+  width: 44px;
+}
+
+/* Logo */
+.sidebar__logo {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  margin-bottom: var(--space-6);
+  cursor: pointer;
+  border-radius: var(--radius-md);
+  transition: background var(--transition-fast);
+}
+.sidebar__logo:hover {
+  background: var(--bg-tertiary);
+}
+
+.sidebar__logo-icon {
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.sidebar__logo-text {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.sidebar__logo-name {
+  font-weight: 800;
+  font-size: 1.05rem;
+  letter-spacing: -0.02em;
+}
+
+.sidebar__logo-version {
+  font-size: 0.7rem;
+  color: var(--text-tertiary);
+  font-weight: 500;
+}
+
+/* Navigation */
+.sidebar__nav {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.sidebar__nav-label {
+  font-size: 0.65rem;
+  font-weight: 700;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  padding: var(--space-2) var(--space-3);
+  margin-bottom: var(--space-1);
+}
+
+.sidebar__nav-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-3);
+  border: none;
+  background: none;
+  color: var(--text-secondary);
+  font-family: var(--font-sans);
+  font-size: 0.875rem;
+  font-weight: 500;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  text-align: left;
+  width: 100%;
+}
+
+.sidebar__nav-item:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.sidebar__nav-item--active {
+  background: rgba(0, 117, 222, 0.08);
+  color: var(--accent-primary);
+}
+
+.sidebar__nav-icon {
+  flex-shrink: 0;
+  font-size: 1.15rem;
+  width: 24px;
+  text-align: center;
+}
+
+.sidebar__nav-label-text {
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.sidebar__nav-indicator {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 20px;
+  background: var(--accent-gradient);
+  border-radius: var(--radius-full);
+}
+
+/* User */
+.sidebar__user {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  margin-top: var(--space-4);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.sidebar__user-avatar {
+  width: 34px;
+  height: 34px;
+  border-radius: var(--radius-full);
+  background: var(--accent-gradient);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: white;
+  flex-shrink: 0;
+}
+
+.sidebar__user-info {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.sidebar__user-name {
+  font-size: 0.825rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+.sidebar__user-role {
+  font-size: 0.7rem;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+
+.sidebar__user-logout {
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.sidebar__user-logout:hover {
+  color: var(--text-secondary);
+}
+
+/* 계정 연동 — 접고 펼치는 섹션 */
+.sidebar__accounts {
+  margin-top: var(--space-3);
+}
+
+.sidebar__accounts-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  background: none;
+  border: none;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-sans);
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+
+.sidebar__accounts-toggle:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.sidebar__accounts-count {
+  color: var(--text-tertiary);
+  font-weight: 500;
+}
+
+.sidebar__accounts-chevron {
+  margin-left: auto;
+  display: inline-block;
+  transition: transform var(--transition-fast);
+}
+
+.sidebar__accounts-chevron--open {
+  transform: rotate(90deg);
+}
+
+.sidebar__accounts-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
