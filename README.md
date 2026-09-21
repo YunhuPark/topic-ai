@@ -4,6 +4,9 @@
 
 기획 배경과 시장조사는 [PLANNING.md](PLANNING.md), 기능 요구사항·완료 기준은 [PRD.md](PRD.md)를 참고하세요.
 
+> **다른 노트북에서 이어서 작업한다면 [HANDOFF.md](HANDOFF.md)를 먼저 읽으세요** —
+> `.env`/`app.db`/`chroma_db`는 git에 없어서 그대로 clone만 하면 앱이 안 돕니다.
+
 ## 구조
 
 ```
