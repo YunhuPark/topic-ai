@@ -26,7 +26,7 @@ from models import (
     SearchResponse, StatsResponse,
     SignupRequest, LoginRequest, AuthResponse, MeResponse,
     LinkedAccount, SearchHistoryItem, ActionItemRecord, SearchCountResponse,
-    AuthorizeUrlResponse,
+    AuthorizeUrlResponse, SyncStatusItem, SyncStatusResponse,
 )
 import rag_pipeline
 import db
@@ -422,6 +422,19 @@ def get_stats(authorization: Optional[str] = Header(None)):
         freshness=freshness_counts,
         topics=topics[:STATS_MAX_TOPICS],
     )
+
+
+@app.get("/api/v1/sync-status", response_model=SyncStatusResponse)
+def sync_status(authorization: Optional[str] = Header(None)):
+    """연동 직후 백그라운드 수집이나 15분 주기 재동기화가 지금 진행 중인 소스가 있는지,
+    마지막 결과가 어땠는지 알려준다. 프론트가 연동 직후 이 엔드포인트를 짧은 간격으로 폴링해서
+    "동기화 중..." 대신 실제 진행 상태(문서 몇 개 가져왔는지, 실패했는지)를 보여줄 수 있다.
+    연동을 아직 안 했거나 이 서버 프로세스가 뜬 뒤로 한 번도 동기화가 안 돈 소스는 목록에 없다
+    (휘발성 상태라 서버 재시작하면 비워짐 — DB에 영속할 만큼 중요한 정보는 아님)."""
+    user = _require_user(authorization)
+    statuses = rag_pipeline.get_sync_status(user["id"])
+    items = [SyncStatusItem(provider=provider, **fields) for provider, fields in statuses.items()]
+    return SyncStatusResponse(items=items)
 
 
 # 권한 확인 결과. 예전엔 전부 bool이라 "권한 없음"과 "토큰이 죽었음"과 "일시적 오류"가 똑같이

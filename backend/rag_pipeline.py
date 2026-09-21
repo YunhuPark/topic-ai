@@ -2,6 +2,8 @@ import hashlib
 import json
 import os
 import sys
+import threading
+from datetime import datetime, timezone
 from typing import List, Optional
 from dotenv import load_dotenv
 
@@ -371,6 +373,29 @@ def remove_user_documents(provider: str, user_id: int) -> int:
     return _prune_missing_documents(list(known), user_id)
 
 
+# provider별 최근 동기화 상태 — 연동 직후 백그라운드 수집이나 15분 주기 재동기화가 지금
+# 진행 중인지, 마지막 결과가 어땠는지를 프론트가 /api/v1/sync-status로 폴링해서 진행률
+# 표시에 쓴다. 여러 스레드(연동 직후 백그라운드 스레드, 주기 재동기화)가 동시에 건드릴 수
+# 있어서 락으로 보호한다. 프로세스 재시작하면 초기화되는 휘발성 상태 — DB에 영속할 필요는
+# 없다(길어야 몇 분짜리 진행 상황일 뿐이라).
+_sync_status: dict[tuple[int, str], dict] = {}
+_sync_status_lock = threading.Lock()
+
+
+def _set_sync_status(user_id: int, provider: str, **fields) -> None:
+    with _sync_status_lock:
+        key = (user_id, provider)
+        current = dict(_sync_status.get(key, {}))
+        current.update(fields)
+        _sync_status[key] = current
+
+
+def get_sync_status(user_id: int) -> dict[str, dict]:
+    """이 사용자가 연동한 소스별 최근 동기화 상태(provider -> {status, lastCount, ...})."""
+    with _sync_status_lock:
+        return {provider: dict(v) for (uid, provider), v in _sync_status.items() if uid == user_id}
+
+
 def sync_documents_for_user(provider: str, access_token: str, user_id: Optional[int] = None) -> int:
     """계정을 연동한 사람 본인의 access token으로, 그 사람이 실제 접근 가능한 문서 전체를
     가져와 Vector DB에 반영한다. API 서버와 같은 프로세스 안에서 바로 실행되므로, 오프라인
@@ -380,31 +405,47 @@ def sync_documents_for_user(provider: str, access_token: str, user_id: Optional[
     임베딩하는 건 원본이 실제로 바뀐 문서뿐이다. 반환값은 **새로 임베딩한 문서 수**.
 
     user_id는 문서의 syncedBy(누가 가져온 문서인지)에 기록돼, 대시보드 통계 범위 제한과
-    연동 해제 시 정리의 기준이 된다."""
+    연동 해제 시 정리의 기준이 된다. user_id가 있으면 진행 상태도 함께 기록한다(get_sync_status)."""
     fetcher = _get_user_fetchers().get(provider)
     if not fetcher:
         return 0
 
-    source = PROVIDER_SOURCES.get(provider, provider)
-    known = _known_documents(source, user_id)
-    docs, seen_ids = fetcher(access_token, known)
-    embedded = ingest_documents(docs, synced_by_user_id=user_id)
-
     if user_id is not None:
-        missing = [doc_id for doc_id in known if doc_id not in seen_ids]
-        if missing and not seen_ids:
-            # 원본에서 아무것도 못 봤다는 건 "전부 삭제됐다"기보다 수집이 실패했다는 뜻일
-            # 가능성이 훨씬 높다. 이럴 때 정리를 돌리면 멀쩡한 문서를 통째로 날린다.
-            print(
-                f"{source} 수집 결과가 비어 있어 이번 주기 정리는 건너뜁니다 "
-                f"(기존 문서 {len(known)}개 유지)."
-            )
-        else:
-            pruned = _prune_missing_documents(missing, user_id)
-            if pruned:
-                print(f"원본에서 사라진 {source} 문서 {pruned}개를 정리했습니다.")
+        _set_sync_status(user_id, provider, status="running", startedAt=datetime.now(timezone.utc).isoformat())
 
-    return embedded
+    try:
+        source = PROVIDER_SOURCES.get(provider, provider)
+        known = _known_documents(source, user_id)
+        docs, seen_ids = fetcher(access_token, known)
+        embedded = ingest_documents(docs, synced_by_user_id=user_id)
+
+        if user_id is not None:
+            missing = [doc_id for doc_id in known if doc_id not in seen_ids]
+            if missing and not seen_ids:
+                # 원본에서 아무것도 못 봤다는 건 "전부 삭제됐다"기보다 수집이 실패했다는 뜻일
+                # 가능성이 훨씬 높다. 이럴 때 정리를 돌리면 멀쩡한 문서를 통째로 날린다.
+                print(
+                    f"{source} 수집 결과가 비어 있어 이번 주기 정리는 건너뜁니다 "
+                    f"(기존 문서 {len(known)}개 유지)."
+                )
+            else:
+                pruned = _prune_missing_documents(missing, user_id)
+                if pruned:
+                    print(f"원본에서 사라진 {source} 문서 {pruned}개를 정리했습니다.")
+    except Exception as e:
+        if user_id is not None:
+            _set_sync_status(
+                user_id, provider, status="error", error=str(e),
+                finishedAt=datetime.now(timezone.utc).isoformat(),
+            )
+        raise  # 호출자(연동 직후 백그라운드 스레드, 자동 재동기화 루프)가 그대로 처리하던 대로 유지
+    else:
+        if user_id is not None:
+            _set_sync_status(
+                user_id, provider, status="done", lastCount=embedded, error=None,
+                finishedAt=datetime.now(timezone.utc).isoformat(),
+            )
+        return embedded
 
 # 3. LLM 요약 프롬프트 셋업
 # 출력 형식은 응답 스키마(models.Summary)에서 직접 뽑아 프롬프트에 박아 넣는다.

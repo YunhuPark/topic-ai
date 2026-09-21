@@ -76,6 +76,12 @@ GITLAB_PROJECTS=
 
 # 선택 — 자동 재동기화 주기(기본 900초)
 # AUTO_RESYNC_INTERVAL_SECONDS=900
+
+# 선택 — 회원가입 허용 도메인 제한(콤마로 여러 개). 비워두면 아무 이메일이나 가입 가능
+# SIGNUP_ALLOWED_DOMAINS=
+
+# 선택 — 배포 시 프론트엔드 실제 주소(콤마로 여러 개). 기본값은 localhost:5173/127.0.0.1:5173
+# FRONTEND_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
 ```
 
 > OAuth 리디렉션 URI는 전부 `localhost:8000` 기준이라 노트북이 바뀌어도 그대로 쓸 수 있다.

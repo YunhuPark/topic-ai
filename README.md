@@ -122,14 +122,16 @@ python rag_pipeline.py --source gitlab
 | 엔드포인트 | 설명 |
 |---|---|
 | `GET /api/v1/search?q={query}` | 통합 검색 — 관련 문서 top-4 + AI 요약(keyPoints/decisionTrail/actionItems) |
-| `GET /api/v1/stats` | 대시보드용 통계 — 총 문서 수, 연동 소스 수, 신선도 분포, 문서 목록 |
-| `POST /api/v1/auth/signup` | 회원가입 (이메일+비밀번호) → JWT 토큰 발급 |
+| `GET /api/v1/stats` | 대시보드용 통계 — 로그인한 사람이 연동해서 가져온 문서만 집계 |
+| `GET /api/v1/sync-status` | 연동 직후/주기적 재동기화가 지금 진행 중인 소스가 있는지, 마지막 결과(문서 수·실패 여부) |
+| `POST /api/v1/auth/signup` | 회원가입 (이메일+비밀번호) → JWT 토큰 발급. `SIGNUP_ALLOWED_DOMAINS` 설정 시 그 도메인만 허용 |
 | `POST /api/v1/auth/login` | 로그인 → JWT 토큰 발급 |
 | `GET /api/v1/auth/me` | 현재 로그인 사용자 정보 (`Authorization: Bearer <token>` 필요) |
-| `POST /api/v1/auth/link/google` | Google access token 검증 후 계정에 연결 |
-| `GET /api/v1/auth/link/{github\|gitlab\|slack\|notion}/start` / `.../callback` | GitHub/GitLab/Slack/Notion OAuth 연결 시작/콜백 |
+| `GET /api/v1/auth/link/{google\|github\|gitlab\|slack\|notion}/start` / `.../callback` | 5개 소스 전부 같은 OAuth 팝업+콜백 패턴 — 연결 성공 시 그 계정 문서 전체를 백그라운드에서 자동 수집 |
+| `DELETE /api/v1/auth/link/{provider}` | 연동 해제 — 그 사람이 이 소스로 가져왔던 문서도 함께 정리 |
 | `GET /api/v1/auth/linked` | 이 계정에 연결된 외부 소스 목록 |
-| `GET /api/v1/search-history`, `GET /api/v1/action-items` | 계정에 귀속된 검색 기록/액션아이템 조회 |
+| `GET /api/v1/search-history`, `GET /api/v1/action-items` | 계정에 귀속된 검색 기록/할 일 조회 |
+| `DELETE /api/v1/action-items/{id}` | 할 일 삭제 |
 
 ## 계정 / 권한 인지형 검색
 
@@ -209,6 +211,42 @@ python rag_pipeline.py --source gitlab
 문서가 그대로면 주기당 임베딩 비용이 0에 수렴합니다. 원본에서 삭제되거나 접근 권한을 잃은
 문서는 자동으로 정리되고, 사이드바에서 **연동을 해제하면** 그 소스로 가져왔던 문서도 함께
 정리됩니다.
+
+## 배포
+
+지금까지는 로컬/사내망에서 `localhost`로만 써왔지만, 실제 서버에 올릴 때 필요한 설정은 대부분
+환경변수로 이미 빠져 있습니다 — 소스를 고칠 필요는 없고 아래만 맞추면 됩니다.
+
+### 백엔드
+1. **`FRONTEND_ORIGINS`**(`backend/.env`) — 배포한 프론트엔드 주소로 설정. 콤마로 여러 개 가능
+   (예: `https://topic-thread.example.com`). OAuth 콜백이 `postMessage`를 보낼 origin과 CORS
+   허용 origin이 둘 다 이 값을 쓴다.
+2. **각 소스의 `*_OAUTH_REDIRECT_URI`** — GitHub/GitLab/Slack/Notion/Google 콘솔에 등록해둔
+   Redirect URI를 `http://localhost:8000/...`에서 실제 배포 도메인으로 바꾸고, `.env`의 대응
+   환경변수(`SLACK_OAUTH_REDIRECT_URI` 등, 나머지는 도메인만 바뀌면 코드가 자동으로 맞춤)도
+   같이 바꾼다. **다섯 소스 전부** 각자 콘솔에서 다시 등록해야 한다 (OAuth 앱 설정 절 참고).
+3. **단일 워커로만 실행할 것** — 권한 확인 캐시(`_permission_cache`)와 동기화 진행 상태
+   (`rag_pipeline._sync_status`)가 프로세스 메모리에만 있다. `--workers 2` 이상으로 띄우면
+   요청이 어느 워커로 가느냐에 따라 캐시가 안 맞거나 `/api/v1/sync-status`가 다른 워커의
+   진행 상황을 못 보는 문제가 생긴다. 여러 워커가 꼭 필요해지면 이 상태를 Redis 등 공유
+   저장소로 옮겨야 한다.
+   ```bash
+   uvicorn main:app --host 0.0.0.0 --port 8000   # --reload 빼고, --workers 지정하지 않음(기본 1)
+   ```
+4. **`backend/app.db`(SQLite)와 `backend/chroma_db/`는 영속 디스크에 있어야** 한다 — 컨테이너
+   재배포 때 날아가면 계정·연동·색인 문서가 전부 사라진다.
+5. `SIGNUP_ALLOWED_DOMAINS`(`backend/.env`, 콤마로 여러 도메인)를 설정하면 그 도메인 이메일만
+   회원가입할 수 있다. 사내 배포라면 설정을 권장 — 비워두면(기본값) 아무나 가입 가능하다.
+
+### 프론트엔드
+`VITE_API_BASE`를 배포한 백엔드 주소로 설정하고 빌드한다 (안 주면 `http://localhost:8000` 기본값):
+```bash
+VITE_API_BASE=https://api.example.com npm run build
+```
+
+### 아직 안 된 것
+- 비밀번호 재설정(SMTP 발신 필요) — 지금은 없음, 계정 잠기면 관리자가 DB에서 직접 처리해야 함
+- 대용량 문서는 토큰 어림치로 잘라서 임베딩(청킹 미구현) — 아주 긴 문서는 뒷부분이 검색에 안 잡힐 수 있음
 
 ## 알려진 운영 이슈
 

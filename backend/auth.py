@@ -140,12 +140,26 @@ def _sync_after_link_background(provider: str, stored_token: str, user_id: int) 
     threading.Thread(target=_run, daemon=True).start()
 
 
+def _check_signup_domain(email: str) -> None:
+    """SIGNUP_ALLOWED_DOMAINS(.env, 콤마로 여러 개)가 설정돼 있으면 그 도메인의 이메일만
+    가입을 허용한다. 설정 안 하면(기본값) 예전처럼 아무 이메일이나 가입 가능 — 사내 배포
+    전에는 꼭 설정할 것을 권장하지만, 로컬 개발/테스트 흐름을 막지 않도록 기본은 무제한이다."""
+    raw = os.getenv("SIGNUP_ALLOWED_DOMAINS", "")
+    allowed = {d.strip().lower().lstrip("@") for d in raw.split(",") if d.strip()}
+    if not allowed:
+        return
+    domain = email.rsplit("@", 1)[-1]
+    if domain not in allowed:
+        raise AuthError(f"{', '.join(sorted(allowed))} 도메인 이메일만 가입할 수 있습니다.")
+
+
 def signup(email: str, password: str) -> tuple[str, str]:
     email = email.strip().lower()
     if not EMAIL_RE.match(email):
         raise AuthError("올바른 이메일 형식이 아닙니다.")
     if len(password) < 8:
         raise AuthError("비밀번호는 8자 이상이어야 합니다.")
+    _check_signup_domain(email)
 
     conn = get_connection()
     try:

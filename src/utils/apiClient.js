@@ -1,6 +1,8 @@
 import { getAuthHeader, clearSession } from './authStore';
 
-export const API_BASE = 'http://localhost:8000';
+// 빌드 시점에 VITE_API_BASE를 넣어주면 그 값을 쓰고(배포용), 없으면 로컬 개발 기본값을 쓴다 —
+// 예전엔 이 값이 하드코딩돼 있어서 localhost가 아닌 곳에 배포하려면 소스를 고쳐야 했다.
+export const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000';
 
 // 세션이 만료(401)되면 화면마다 따로 처리하는 대신 여기서 한 번에 처리한다 — 예전엔 각 fetch가
 // 실패를 조용히 삼켜서, 토큰이 만료돼도 사이드바엔 이메일이 그대로 보이는데 연동은 0/5, 검색은

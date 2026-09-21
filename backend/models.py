@@ -95,9 +95,16 @@ class SearchCountResponse(BaseModel):
 class AuthorizeUrlResponse(BaseModel):
     authorizeUrl: str
 
-class SyncResponse(BaseModel):
+class SyncStatusItem(BaseModel):
     provider: str
-    count: int
+    status: str  # "running" | "done" | "error"
+    startedAt: Optional[str] = None
+    finishedAt: Optional[str] = None
+    lastCount: Optional[int] = None
+    error: Optional[str] = None
+
+class SyncStatusResponse(BaseModel):
+    items: List[SyncStatusItem]
 
 class ActionItemRecord(BaseModel):
     id: int
