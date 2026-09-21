@@ -101,6 +101,10 @@ export default function SearchBar({ onSearch, isSearching, topics = [] }) {
                 <button
                   key={i}
                   className="search-bar__suggestion"
+                  // 버튼을 누르는 순간(mousedown) 입력창이 blur되면서 열려있던 드롭다운이
+                  // 클릭(click)보다 먼저 닫혀버려 클릭이 씹히는 경우가 있었다 — mousedown에서
+                  // 기본 포커스 이동을 막아 입력창이 blur되지 않게 해서 클릭이 항상 먹히게 한다.
+                  onMouseDown={(e) => e.preventDefault()}
                   onClick={() => handleSuggestionClick(item.query)}
                 >
                   <span className="search-bar__suggestion-icon">↩</span>
@@ -122,6 +126,7 @@ export default function SearchBar({ onSearch, isSearching, topics = [] }) {
                   <button
                     key={topic.id}
                     className="search-bar__topic-bubble"
+                    onMouseDown={(e) => e.preventDefault()}
                     onClick={() => handleSuggestionClick(topic.label)}
                   >
                     {topic.label}

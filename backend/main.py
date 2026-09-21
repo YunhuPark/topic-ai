@@ -19,6 +19,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import requests as http_requests
 from fastapi import FastAPI, Query, Header, HTTPException
+from langchain_core.documents import Document
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from typing import Optional
@@ -147,6 +148,28 @@ def _keyword_boost(query: str, title: str, content: str, source_name: str = "") 
         elif t in content_l:
             score += 1.0
     return score / (len(tokens) * weight_per_token)
+
+
+def _title_match_candidates(vectorstore, query: str, exclude_ids: set[str]) -> list[Document]:
+    """벡터 유사도로는 상위 후보(SEARCH_CANDIDATE_POOL)에 아예 못 드는 문서를, 제목에 검색어가
+    그대로 들어있으면 구제한다. _keyword_boost는 이미 뽑힌 후보 안에서만 재정렬하므로, 벡터
+    거리가 애초에 너무 멀면(예: 스캔 악보 PDF처럼 본문 텍스트가 의미 없는 문서) 제목이 정확히
+    일치해도 후보에 들지 못해 키워드 보정이 손 쓸 기회조차 없다 — 실제 사례: "붕붕" 검색 시
+    제목이 "김하온-붕붕.pdf"인 문서가 상위 40위 안에도 못 듦(본문이 악보 표기라 임베딩이
+    질의어와 무관). 컬렉션 전체를 훑는 건 지금 규모(수백 건)에서만 괜찮은 임시방편 — 문서가
+    훨씬 많아지면 SQLite FTS 같은 진짜 텍스트 검색 인덱스로 바꿔야 한다."""
+    query_lower = query.strip().lower()
+    if not query_lower:
+        return []
+    all_docs = vectorstore._collection.get(include=["metadatas", "documents"])
+    matches = []
+    for meta, content in zip(all_docs["metadatas"], all_docs["documents"]):
+        doc_id = meta.get("id")
+        if not doc_id or doc_id in exclude_ids:
+            continue
+        if query_lower in (meta.get("title") or "").lower():
+            matches.append(Document(page_content=content, metadata=meta))
+    return matches
 
 
 def compute_freshness(date_str: str) -> str:
@@ -718,6 +741,12 @@ def search_documents(
                 "decisionTrail": [],
                 "actionItems": [],
             })
+
+        # 벡터 후보만으로는 못 건지는 제목 일치 문서를 구제한다 — distance=2.0(관련도 0)으로
+        # 넣어서, 순수 키워드 점수(_keyword_boost)만으로 통과 여부가 결정되게 한다.
+        existing_ids = {d.metadata.get("id") for d, _ in results}
+        title_matches = _title_match_candidates(vectorstore, q, existing_ids)
+        results = results + [(d, 2.0) for d in title_matches]
 
         scored_results = []
         for d, distance in results:
