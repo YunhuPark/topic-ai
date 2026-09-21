@@ -1,15 +1,20 @@
 """서비스 계정(또는 계정 연동한 사용자 본인)에 공유된 Google Drive 파일을 읽어와
 Topic Thread AI의 공통 문서 포맷(dict)으로 변환한다. 쓰기 작업은 하지 않는다.
 
-지원 파일 형식 (PRD.md FR-5/Phase 7 참고):
+공유된 파일은 폴더를 뺀 전부가 색인 대상이다(계정을 연동하면 그 안의 파일이 전부 검색돼야
+한다는 요구 때문 — 형식으로 목록 자체를 제한하지 않는다). 다만 본문을 실제로 읽어오는 건
+아래 형식만 가능하고, 그 외는 파일명만으로 색인된다(내용 미리보기는 없음):
+
+본문 추출 지원 (PRD.md FR-5/Phase 7 참고):
 - Google 네이티브: Docs, Sheets, Slides
 - 업로드된 원본 파일: PDF, MS Word(.docx), MS Excel(.xlsx), MS PowerPoint(.pptx), 한글 HWPX(.hwpx)
 
-미지원(알려진 한계):
+본문 추출 미지원(파일명만 색인됨, 알려진 한계):
+- 이미지/동영상/오디오, zip 등 일반 바이너리 파일
 - 스캔 이미지로만 이뤄진 PDF: 텍스트 레이어가 없어 본문을 못 뽑음 (OCR은 범위 밖)
 - 레거시 바이너리 .hwp(2014년 이전 한글 파일 포맷)와 구버전 MS Office(.doc/.xls/.ppt):
-  신뢰할 만한 순수 파이썬 파서가 없어서 건너뛴다 — 회사에서 최신 한글/오피스로 다시 저장하거나
-  PDF로 내보내면 검색 대상이 됨
+  신뢰할 만한 순수 파이썬 파서가 없음 — 회사에서 최신 한글/오피스로 다시 저장하거나
+  PDF로 내보내면 본문까지 검색 대상이 됨
 
 사전 준비 (사용자가 Google Cloud Console에서 직접 해야 하는 것):
 1. GCP 프로젝트 생성 후 "Google Drive API"와 "Google Sheets API" 활성화 (Sheets 문서를
@@ -24,6 +29,7 @@ Topic Thread AI의 공통 문서 포맷(dict)으로 변환한다. 쓰기 작업�
 
 import io
 import os
+import re
 import time
 import zipfile
 import xml.etree.ElementTree as ET
@@ -52,11 +58,6 @@ MIME_DOC = "application/vnd.google-apps.document"
 MIME_SHEET = "application/vnd.google-apps.spreadsheet"
 MIME_SLIDES = "application/vnd.google-apps.presentation"
 MIME_PDF = "application/pdf"
-# 업로드된 원본 파일은 mimeType이 앱마다 제각각이거나 불확실해서(특히 한글 HWP는 Drive가
-# 붙이는 mimeType이 문서화가 부실함), mimeType 대신 파일명 확장자로 판별한다 — 아래
-# _list_shared_files의 "name contains" 절, _extract_content의 확장자 분기 참고.
-UPLOADED_EXTENSIONS = (".docx", ".xlsx", ".pptx", ".hwpx", ".hwp")
-SUPPORTED_MIME_TYPES = [MIME_DOC, MIME_SHEET, MIME_SLIDES, MIME_PDF]
 
 _KIND_LABELS = {
     MIME_DOC: "doc",
@@ -88,16 +89,55 @@ def _build_services_for_user(access_token: str):
     return build("drive", "v3", credentials=credentials), build("sheets", "v4", credentials=credentials)
 
 
+# 검색 대상이 될 이유가 없는 코드/빌드 산출물 확장자 — 실사용 중 사용자 Drive에 프로젝트
+# 폴더(venv/node_modules/빌드 결과물 포함)가 통째로 들어있는 걸 발견함: 이걸 그대로
+# 색인했더니 .pyc/.class 같은 파일 4900여 개가 실제 임베딩 비용을 태우며 쌓였다(본문 추출도
+# 안 되니 파일명으로만 색인되는데, "main.py"처럼 흔한 이름은 검색에 아무 도움이 안 됨).
+# 소스코드/설정/컴파일 산출물 모두 제외 — 문서(doc/sheet/pdf 등)로 보기 어려운 범주다.
+_JUNK_EXTENSIONS = (
+    # 컴파일/빌드 산출물, 바이너리
+    ".pyc", ".pyo", ".pyd", ".class", ".exe", ".dll", ".so", ".dylib", ".o", ".obj",
+    ".bin", ".a", ".lib", ".jar", ".whl", ".egg", ".egg-info", ".pdb", ".ilk", ".exp",
+    ".wasm", ".node",
+    # 소스 코드
+    ".py", ".pyi", ".java", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
+    ".c", ".h", ".cpp", ".hpp", ".cs", ".go", ".rb", ".php", ".rs", ".swift", ".kt",
+    ".scala", ".sh", ".bash", ".ps1", ".bat", ".cmd", ".sql",
+    # 패키지/의존성 트리의 설정·잠금·메타 파일
+    ".lock", ".gradle", ".cmake", ".mk", ".toml", ".cfg", ".ini", ".conf",
+    ".properties", ".gitignore", ".gitattributes", ".editorconfig", ".dockerignore",
+    ".typed", ".sample", ".pem", ".apache", ".bsd", ".mit", ".gpl", ".env",
+)
+
+# .git 폴더나 파이썬 venv의 .dist-info 폴더 내부 파일은 확장자가 없어서(HEAD, master, 40자리
+# SHA-1 객체 파일명, RECORD/METADATA/WHEEL 등) 위 확장자 목록으로 못 거른다 — 실사용 중 실제로
+# 800여 개가 .git 객체로, 이어서 또 다른 수백 개가 pip 패키지 메타데이터로 잡힌 걸 확인함.
+# 이름 자체로 판별한다.
+_DEPENDENCY_ARTIFACT_NAMES = {
+    # .git 내부
+    "head", "master", "index", "commit_editmsg", "merge_head", "orig_head",
+    "fetch_head", "packed-refs", "description", "config",
+    # pip .dist-info 메타데이터
+    "record", "installer", "requested", "metadata", "wheel", "license",
+    "authors", "changelog", "changes", "top_level.txt", "entry_points.txt",
+}
+_GIT_OBJECT_HASH_RE = re.compile(r"^[0-9a-f]{30,40}$")
+
+
+def _looks_like_git_internal(name: str) -> bool:
+    n = name.strip().lower()
+    return n in _DEPENDENCY_ARTIFACT_NAMES or bool(_GIT_OBJECT_HASH_RE.match(n))
+
+
 def _list_shared_files(drive_service) -> list[dict]:
-    """서비스 계정(또는 이 사람 본인)에 공유된 파일 중 지원하는 형식만 반환한다
-    (Google 네이티브 Docs/Sheets/Slides + PDF는 mimeType으로, 업로드된 원본 파일은
-    mimeType이 애매해 파일명 확장자로 걸러낸다 — .hwp도 일단 여기서 걸러서 가져온 뒤
-    _extract_content에서 레거시 바이너리인지(.hwp) 최신 zip 기반(.hwpx)인지 다시 나눈다)."""
+    """서비스 계정(또는 이 사람 본인)에 공유된 파일을 폴더·코드빌드산출물만 빼고 전부
+    가져온다 — 계정을 연동하면 그 안의 파일이 전부 검색 대상이 돼야 한다는 요구 때문에,
+    예전처럼 지원 형식으로 목록 조회 자체를 제한하지는 않는다. 본문을 추출할 수 있는 형식
+    (Docs/Sheets/Slides/PDF/docx/xlsx/pptx/hwpx)은 실제 내용을, 그 외(이미지/동영상/zip/
+    레거시 .hwp 등)는 파일명만 색인한다 — 어느 쪽이든 _convert_files에서 결정된다."""
     files = []
     page_token: Optional[str] = None
-    mime_filter = " or ".join(f"mimeType = '{m}'" for m in SUPPORTED_MIME_TYPES)
-    name_filter = " or ".join(f"name contains '{ext}'" for ext in UPLOADED_EXTENSIONS)
-    query = f"({mime_filter} or {name_filter}) and trashed = false"
+    query = "mimeType != 'application/vnd.google-apps.folder' and trashed = false"
     while True:
         response = drive_service.files().list(
             q=query,
@@ -110,7 +150,11 @@ def _list_shared_files(drive_service) -> list[dict]:
         page_token = response.get("nextPageToken")
         if not page_token:
             break
-    return files
+    return [
+        f for f in files
+        if not (f.get("name") or "").lower().endswith(_JUNK_EXTENSIONS)
+        and not _looks_like_git_internal(f.get("name") or "")
+    ]
 
 
 def _export_plain_text(drive_service, file_id: str) -> str:
@@ -276,15 +320,26 @@ def _extract_content(drive_service, sheets_service, f: dict) -> Optional[str]:
     return None
 
 
-def _resolve_kind(f: dict) -> Optional[str]:
-    mime = f.get("mimeType")
+def _resolve_kind(f: dict) -> str:
+    """태그용 종류 라벨. 본문 추출 가능 여부와는 별개다(그건 _extract_content가 판단) —
+    모르는 형식이라도 라벨은 항상 뭔가 반환해서(mime 대분류나 확장자) 파일명 기반 색인이
+    가능하게 한다."""
+    mime = f.get("mimeType") or ""
     if mime in _KIND_LABELS:
         return _KIND_LABELS[mime]
     name = (f.get("name") or "").lower()
     for ext, kind in _EXTENSION_KIND_LABELS.items():
         if name.endswith(ext):
             return kind
-    return None
+    if mime.startswith("image/"):
+        return "image"
+    if mime.startswith("video/"):
+        return "video"
+    if mime.startswith("audio/"):
+        return "audio"
+    if "." in name:
+        return name.rsplit(".", 1)[-1]
+    return "file"
 
 
 def _convert_files(
@@ -301,9 +356,6 @@ def _convert_files(
 
     for f in files:
         kind = _resolve_kind(f)
-        if kind is None:
-            print(f"'{f.get('name')}'는 지원하지 않는 파일 형식이라 건너뜁니다 (예: 레거시 .hwp).")
-            continue
 
         doc_id = f"gdrive-{f['id']}"
         seen_ids.add(doc_id)
@@ -319,7 +371,9 @@ def _convert_files(
             print(f"'{f.get('name')}' 내보내기 실패, 건너뜁니다: {e}")
             continue
         if content is None:
-            continue
+            # 본문을 추출할 수 없는 형식(이미지/동영상/zip/레거시 .hwp 등)이라도 색인 자체는
+            # 한다 — 검색은 파일명으로만 되고, AI 요약은 내용이 없다는 걸 그대로 알려준다.
+            content = "(미리보기를 지원하지 않는 파일 형식이라 본문 내용은 없습니다 — 파일명으로만 검색됩니다.)"
 
         owners = f.get("owners") or []
         author = owners[0]["displayName"] if owners else "알 수 없음"
