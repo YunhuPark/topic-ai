@@ -1,6 +1,9 @@
-"""GitLab 프로젝트의 Issue/Merge Request(본문+댓글)를 읽어와 Topic Thread AI의
-공통 문서 포맷(dict)으로 변환한다. 쓰기 작업은 하지 않는다. README/위키는
-Out of scope (github_connector.py와 동일한 스코프 결정을 따름).
+"""GitLab 프로젝트의 Issue/Merge Request(본문+댓글)와 프로젝트 자체(설명+README)를
+읽어와 Topic Thread AI의 공통 문서 포맷(dict)으로 변환한다. 쓰기 작업은 하지 않는다.
+위키는 Out of scope (github_connector.py와 동일한 스코프 결정을 따름).
+
+프로젝트 문서(설명+README)를 따로 만드는 이유는 github_connector.py와 동일 —
+Issue/MR이 하나도 없는 프로젝트도 검색 대상에 들어가야 한다.
 
 사전 준비 (사용자가 GitLab에서 직접 해야 하는 것):
 1. GitLab > 설정(Preferences) > Access Tokens 에서 Personal Access Token 발급
@@ -154,6 +157,59 @@ def item_document_id(project_path: str, kind: str, iid: int) -> str:
     return f"gitlab-{project_path}#{kind}-{iid}"
 
 
+def project_document_id(project_path: str) -> str:
+    return f"gitlab-{project_path}#readme"
+
+
+def _fetch_project_readme(project_id: str, meta: dict, headers: dict) -> str:
+    """README 원문을 가져온다. GitLab에는 GitHub의 '/readme' 같은 전용 엔드포인트가 없어서,
+    프로젝트 메타의 readme_url(예: .../-/blob/main/README.md)에서 브랜치·경로를 뽑아
+    Repository Files API로 raw 내용을 받는다. README가 없으면 readme_url 자체가 없다."""
+    readme_url = meta.get("readme_url") or ""
+    default_branch = meta.get("default_branch") or ""
+    marker = f"/-/blob/{default_branch}/"
+    idx = readme_url.find(marker)
+    if not default_branch or idx == -1:
+        return ""
+    file_path = readme_url[idx + len(marker):]
+    encoded_path = urllib.parse.quote(file_path, safe="")
+    try:
+        resp = _request(
+            "GET",
+            f"/projects/{project_id}/repository/files/{encoded_path}/raw",
+            headers,
+            params={"ref": default_branch},
+        )
+        return resp.text
+    except requests.HTTPError as e:
+        if e.response is not None and e.response.status_code == 404:
+            return ""
+        raise
+
+
+def _project_to_document(project_path: str, project_id: str, meta: dict, headers: dict) -> dict:
+    readme = _fetch_project_readme(project_id, meta, headers)
+    description = meta.get("description") or ""
+    content = "\n\n".join(part for part in (description, readme) if part) or "(설명 및 README 없음)"
+    updated_at = meta.get("last_activity_at") or ""
+    namespace = project_path.split("/")[0]
+
+    return {
+        "id": project_document_id(project_path),
+        "title": f"{project_path} — 프로젝트 개요",
+        "source": "gitlab",
+        "author": namespace,
+        "authorAvatar": namespace[:2],
+        "date": (updated_at or "")[:10] or "1970-01-01",
+        "content": content,
+        "tags": ["gitlab", project_path, "project"],
+        "freshness": "fresh",
+        "relevance": 1.0,
+        "sourceUrl": meta.get("web_url", ""),
+        "sourceUpdatedAt": updated_at,
+    }
+
+
 def _fetch_project_documents(
     project_path: str, since_iso: str, headers: dict, known: Optional[dict[str, str]] = None
 ) -> tuple[list[dict], set[str]]:
@@ -162,6 +218,14 @@ def _fetch_project_documents(
     project_id = urllib.parse.quote(project_path, safe="")
     documents = []
     seen_ids = set()
+
+    # 프로젝트 자체 문서(설명+README) — 프로젝트마다 항상 최대 1개.
+    proj_doc_id = project_document_id(project_path)
+    seen_ids.add(proj_doc_id)
+    project_meta = _request("GET", f"/projects/{project_id}", headers).json()
+    project_updated_at = project_meta.get("last_activity_at") or ""
+    if not (project_updated_at and known.get(proj_doc_id) == project_updated_at):
+        documents.append(_project_to_document(project_path, project_id, project_meta, headers))
 
     for kind, items in (
         ("issue", _list_recent_issues(project_id, since_iso, headers)),

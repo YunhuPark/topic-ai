@@ -1,6 +1,10 @@
-"""GitHub 저장소의 Issue/PR(본문+댓글)을 읽어와 Topic Thread AI의 공통
-문서 포맷(dict)으로 변환한다. 쓰기 작업은 하지 않는다. README/위키는
-Out of scope (PRD.md FR-6 참고).
+"""GitHub 저장소의 Issue/PR(본문+댓글)과 저장소 자체(설명+README)를 읽어와
+Topic Thread AI의 공통 문서 포맷(dict)으로 변환한다. 쓰기 작업은 하지 않는다.
+위키는 Out of scope (PRD.md FR-6 참고).
+
+저장소 문서(설명+README)를 따로 만드는 이유: fox-devil처럼 막 만들었거나 Issue/PR
+없이 코드만 있는 개인 프로젝트는, Issue/PR만 색인하면 검색 결과에 영원히 안 잡힌다
+(계정 연동으로 저장소 자체는 정상 탐색됐는데도). 저장소당 최대 1개 문서로 항상 만든다.
 
 사전 준비 (사용자가 GitHub에서 직접 해야 하는 것):
 1. https://github.com/settings/tokens 에서 Personal Access Token 발급
@@ -150,6 +154,47 @@ def issue_document_id(owner: str, repo: str, number: int) -> str:
     return f"github-{owner}/{repo}#{number}"
 
 
+def repo_document_id(owner: str, repo: str) -> str:
+    return f"github-{owner}/{repo}#readme"
+
+
+def _fetch_repo_readme(owner: str, repo: str, headers: dict) -> str:
+    """README 원문(마크다운)을 가져온다. README가 없는 저장소는 흔하므로 404는 빈 문자열로 처리."""
+    try:
+        resp = _request(
+            "GET",
+            f"/repos/{owner}/{repo}/readme",
+            {**headers, "Accept": "application/vnd.github.raw+json"},
+        )
+        return resp.text
+    except requests.HTTPError as e:
+        if e.response is not None and e.response.status_code == 404:
+            return ""
+        raise
+
+
+def _repo_to_document(owner: str, repo: str, meta: dict, headers: dict) -> dict:
+    readme = _fetch_repo_readme(owner, repo, headers)
+    description = meta.get("description") or ""
+    content = "\n\n".join(part for part in (description, readme) if part) or "(설명 및 README 없음)"
+    updated_at = meta.get("pushed_at") or meta.get("updated_at") or ""
+
+    return {
+        "id": repo_document_id(owner, repo),
+        "title": f"{owner}/{repo} — 저장소 개요",
+        "source": "github",
+        "author": owner,
+        "authorAvatar": owner[:2],
+        "date": (updated_at or "")[:10] or "1970-01-01",
+        "content": content,
+        "tags": ["github", f"{owner}/{repo}", "repo"],
+        "freshness": "fresh",
+        "relevance": 1.0,
+        "sourceUrl": meta.get("html_url", f"https://github.com/{owner}/{repo}"),
+        "sourceUpdatedAt": updated_at,
+    }
+
+
 def _fetch_repo_documents(
     owner: str, repo: str, since_iso: str, headers: dict, known: Optional[dict[str, str]] = None
 ) -> tuple[list[dict], set[str]]:
@@ -157,6 +202,15 @@ def _fetch_repo_documents(
     known = known or {}
     documents = []
     seen_ids = set()
+
+    # 저장소 자체 문서(설명+README) — 저장소마다 항상 최대 1개. Issue/PR과 무관하게 만들어야
+    # Issue/PR이 하나도 없는 저장소도 검색 대상에 들어간다.
+    repo_doc_id = repo_document_id(owner, repo)
+    seen_ids.add(repo_doc_id)
+    repo_meta = _request("GET", f"/repos/{owner}/{repo}", headers).json()
+    repo_updated_at = repo_meta.get("pushed_at") or repo_meta.get("updated_at") or ""
+    if not (repo_updated_at and known.get(repo_doc_id) == repo_updated_at):
+        documents.append(_repo_to_document(owner, repo, repo_meta, headers))
 
     for issue in _list_recent_issues(owner, repo, since_iso, headers):
         doc_id = issue_document_id(owner, repo, issue["number"])

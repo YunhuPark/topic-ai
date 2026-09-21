@@ -195,7 +195,8 @@ Notion의 "통합에 페이지 공유하기"와 동일한 사용자 경험을 �
 그 저장소만 대상이 된다 (Slack의 "봇을 채널에 초대"와 같은 역할 — 명시적으로 지정한 곳만 읽는다).
 
 **범위 (결정 사항)**
-- **Issues와 PR을 대상으로 한다** (README/위키는 이번 Phase 범위 밖 — Out of scope로 명시). GitHub REST API의
+- **Issues와 PR을 대상으로 한다** (위키는 범위 밖 — Out of scope로 명시. README는 이후 FR-15
+  검증 중 Issue/PR 없는 저장소가 검색에서 빠지는 문제로 인해 대상에 추가됨). GitHub REST API의
   `/repos/{owner}/{repo}/issues` 엔드포인트는 PR도 함께 반환하므로 하나의 엔드포인트로 처리
 - 최근 **90일** 이내 업데이트된 Issue/PR만 (`since` 파라미터) — Slack과 동일한 `*_LOOKBACK_DAYS` 상수 패턴
 - Issue/PR 하나 = 문서 하나. 본문 + 모든 댓글을 시간순으로 이어붙여 하나의 문서로 만든다 (Slack 스레드 묶기와
@@ -211,7 +212,8 @@ Notion의 "통합에 페이지 공유하기"와 동일한 사용자 경험을 �
 
 ### FR-7. GitLab 커넥터 (신규 — Phase 5, GitHub 커넥터와 동일 패턴)
 
-- GitHub 커넥터(FR-6)와 스코프 결정이 동일: **Issues와 Merge Request만 대상**, README/위키는 범위 밖
+- GitHub 커넥터(FR-6)와 스코프 결정이 동일: **Issues와 Merge Request만 대상**, 위키는 범위 밖
+  (README는 FR-6과 동일하게 FR-15 검증 중 추가됨)
 - 연동 방식도 동일하게 PAT(read_api 스코프) + 명시적 프로젝트 목록(`GITLAB_PROJECTS`)
 - GitHub와의 차이점(구현상 유의): GitLab API는 Issue/MR을 한 엔드포인트로 합쳐주지 않아 두 번 조회, 페이지네이션은
   `X-Next-Page` 헤더 기반, 시스템 자동 생성 노트(라벨 변경 등)는 `system: true` 필드로 제외
@@ -440,6 +442,12 @@ Internal Integration(`NOTION_TOKEN`)으로만 공유돼 있고 이 OAuth 연결�
   내용이 통째로 누락되는 것을 확인함 — `gdrive_connector.py`의 `_sheets_api_call()`이 호출 사이
   최소 간격(1.1초)을 두어 애초에 한도를 안 넘기게 하고, 그래도 429가 나면 지수 백오프로 재시도함
   (합성 429 응답으로 재시도 동작 단위 테스트함)
+- [x] **Issue/PR·MR이 하나도 없는 저장소·프로젝트가 검색에서 영원히 빠지는 문제 발견 및 수정
+  (2026-09-21)**: 실사용 중 GitHub `fox-devil`(개인 프로젝트, Issue/PR 0건) 검색이 안 되는 걸
+  확인 — 계정 연동으로 저장소 자체는 정상 탐색됐지만, FR-6/FR-7에서 "Out of scope"로 뒀던
+  README/위키 중 README를 여전히 색인하지 않아 Issue/PR 없는 저장소는 애초에 문서가 하나도
+  안 만들어졌던 것. `github_connector.py`/`gitlab_connector.py`에 저장소·프로젝트당 최대 1개
+  "설명+README" 문서(`#readme` id)를 추가로 만들도록 고침 — 위키는 여전히 범위 밖.
 
 ### FR-16. 실사용 전 전체 코드 감사 및 수정 (Phase 8)
 

@@ -725,9 +725,17 @@ def search_documents(
         scored_results.sort(key=lambda item: item[0], reverse=True)
 
         # 관련도 자체가 너무 낮은 후보는 권한 확인·순위 대상에서 아예 제외한다 — 안 그러면
-        # 색인된 문서 어디에도 안 맞는 검색어("fox" 등)도 "그나마 덜 먼" 문서 4개를 억지로
+        # 색인된 문서 어디에도 안 맞는 검색어("xyz123" 등)도 "그나마 덜 먼" 문서 4개를 억지로
         # 보여주게 된다.
-        relevant_results = [r for r in scored_results if r[1] >= MIN_SEARCH_RELEVANCE]
+        #
+        # 순수 벡터 관련도(r[1])가 아니라 max(combined_score, relevance)로 걸러야 한다 — 실제
+        # 발견된 문제: "fox"로 검색하면 제목이 "fox-devil"인 문서가 벡터 유사도만으로는 0.29로
+        # 임계값(0.3)에 살짝 못 미쳐, 제목에 검색어가 그대로 들어있는데도 _keyword_boost가 적용될
+        # 기회조차 없이 걸러졌다. combined_score는 키워드 일치 시에만 relevance보다 높아지므로
+        # (키워드 일치가 없으면 relevance*0.65로 오히려 더 낮음) 이 기준을 순수 벡터 매칭
+        # 결과에 대해서는 그대로 유지하면서, "검색어가 제목/출처명에 그대로 들어간" 경우만
+        # 구제한다.
+        relevant_results = [r for r in scored_results if max(r[0], r[1]) >= MIN_SEARCH_RELEVANCE]
 
         # 후보들이 참조하는 "권한 확인 대상"을 먼저 모아서 중복을 없앤다 — 같은 저장소·채널의
         # 문서가 여러 개 걸리는 게 보통이라, 이것만으로도 실제 확인 횟수가 크게 준다.
