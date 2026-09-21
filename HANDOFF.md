@@ -107,6 +107,14 @@ uvicorn main:app --reload --port 8000
 - 5개 소스(Google Drive/GitHub/GitLab/Slack/Notion) 계정 연동 → 그 사람이 접근 가능한 문서 전체 자동 수집
   (GitHub/GitLab은 Issue/PR·MR뿐 아니라 저장소·프로젝트당 "설명+README" 문서도 1개씩 만든다 —
   Issue/PR이 하나도 없는 저장소도 검색에 잡히게 하기 위함, 2026-09-21 추가)
+  **Google Drive는 지원 형식(Docs/Sheets/Slides/PDF/docx/xlsx/pptx/hwpx)이 아니어도 폴더만 빼고
+  전부 목록에 올린다**(2026-09-21 추가) — 본문 추출이 안 되면 파일명만 색인. 단 코드/빌드
+  산출물(.py/.pyc/.class/.lock 등)과 .git·pip .dist-info 내부 파일(RECORD/METADATA/LICENSE,
+  git 객체 해시명 등)은 이름·확장자로 걸러서 애초에 목록에도 안 올린다 — 실사용 중 사용자
+  Drive에 venv/.git이 통째로 들어있어서 필터 없이 색인했다가 4900여 개(대부분 쓸모없는 빌드
+  산출물)가 실제 임베딩 비용을 태우며 쌓인 사고가 있었다(`gdrive_connector._JUNK_EXTENSIONS`/
+  `_looks_like_git_internal` 참고). 이 블록리스트는 이번에 발견된 패턴 기준이라 완전하지 않을
+  수 있다 — 비슷한 노이즈가 또 보이면 같은 방식으로 추가할 것.
 - 15분 간격 백그라운드 **증분** 재동기화 (바뀐 문서만 다시 임베딩)
 - 권한 인지형 검색 — 검색하는 사람 본인 토큰으로 문서마다 실시간 확인(기본 거부)
 - GPT-4o 요약 + 의사결정 흐름 + 할 일 리스트(담당자 자동 추론)
