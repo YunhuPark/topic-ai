@@ -13,8 +13,13 @@ FR-4 스펙 (PRD.md 참고):
 - 봇이 멤버인 채널만 대상
 - 채널별 최근 SLACK_LOOKBACK_DAYS 일 이내 메시지만
 - 스레드는 통째로 한 문서, 스레드 없는 메시지는 같은 날짜끼리 묶어서 한 문서
+
+메시지에 첨부된 파일(files 배열)도 읽는다(2026-09-21 추가) — PDF/DOCX/일반 텍스트류는 실제
+본문까지, 그 외(이미지 등)는 파일명만 메시지 본문에 같이 남겨서 최소한 파일명으로는 검색되게
+한다(gdrive_connector의 "본문 추출 안 되면 파일명만" 패턴과 동일).
 """
 
+import io
 import os
 import re
 import time
@@ -23,7 +28,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import requests
+from docx import Document as DocxDocument
 from dotenv import load_dotenv
+from pypdf import PdfReader
 
 load_dotenv()
 
@@ -147,10 +154,54 @@ def _fetch_thread_replies(channel_id: str, thread_ts: str, headers: dict) -> lis
     return sorted(replies, key=lambda m: float(m["ts"]))[1:]
 
 
+def _download_slack_file(url: str, headers: dict) -> bytes:
+    resp = requests.get(url, headers=headers, timeout=30)
+    resp.raise_for_status()
+    return resp.content
+
+
+def _extract_file_text(f: dict, headers: dict) -> str:
+    """PDF/DOCX/일반 텍스트 첨부만 실제 본문을 읽는다(이미 gdrive_connector에서 쓰는 것과
+    같은 파서 재사용). 그 외(이미지 등)는 미리보기 없이 파일명만 메시지에 남는다 — 그래도
+    검색은 파일명으로 된다."""
+    filetype = (f.get("filetype") or "").lower()
+    name = (f.get("name") or "").lower()
+    url = f.get("url_private_download") or f.get("url_private")
+    if not url:
+        return ""
+    try:
+        if filetype == "pdf" or name.endswith(".pdf"):
+            reader = PdfReader(io.BytesIO(_download_slack_file(url, headers)))
+            return "\n\n".join((p.extract_text() or "") for p in reader.pages).strip()
+        if filetype == "docx" or name.endswith(".docx"):
+            doc = DocxDocument(io.BytesIO(_download_slack_file(url, headers)))
+            return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+        if name.endswith((".txt", ".md", ".csv", ".log", ".json", ".yaml", ".yml")):
+            return _download_slack_file(url, headers).decode("utf-8", errors="replace")
+    except Exception:
+        return ""  # 다운로드/파싱 실패해도 메시지 자체 수집은 계속 진행
+    return ""
+
+
+def _format_attachments(msg: dict, headers: dict) -> str:
+    files = msg.get("files") or []
+    if not files:
+        return ""
+    lines = []
+    for f in files:
+        name = f.get("name") or f.get("title") or "파일"
+        text = _extract_file_text(f, headers)
+        lines.append(f"[첨부파일: {name}]\n{text}" if text else f"[첨부파일: {name}] (미리보기 지원 안 함)")
+    return "\n".join(lines)
+
+
 def _format_message_line(msg: dict, headers: dict) -> str:
     author = _resolve_user_name(msg.get("user"), headers)
     ts = datetime.fromtimestamp(float(msg["ts"]), tz=timezone.utc)
     text = _resolve_mentions(msg.get("text", ""), headers)
+    attachments = _format_attachments(msg, headers)
+    if attachments:
+        text = f"{text}\n{attachments}" if text else attachments
     return f"**{author}** ({ts.strftime('%H:%M')}): {text}"
 
 
