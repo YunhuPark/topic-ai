@@ -28,6 +28,17 @@ export async function toggleActionItemStatus(id) {
   return rows.map(toCamelCase);
 }
 
+// 검색 결과에 후보로 뜬 할 일 중 사용자가 직접 고른 것만 저장한다 — 예전엔 검색할 때마다
+// 전부 자동 저장돼서 테스트 검색까지 할 일 목록에 쌓였다.
+export async function saveActionItem(query, item) {
+  const rows = await apiFetch('/api/v1/action-items', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query, item }),
+  });
+  return rows.map(toCamelCase);
+}
+
 export async function deleteActionItem(id) {
   const rows = await apiFetch(`/api/v1/action-items/${id}`, { method: 'DELETE' });
   return rows.map(toCamelCase);

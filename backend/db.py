@@ -216,7 +216,10 @@ def delete_action_item(user_id: int, item_id: int) -> bool:
 
 
 def toggle_action_item_status(user_id: int, item_id: int) -> Optional[dict]:
-    STATUS_CYCLE = ["pending", "in-progress", "completed"]
+    """완료 여부만 토글하는 체크박스형 — 예전엔 대기→진행중→완료로 순환해서 "완료로 바로
+    체크"가 안 됐다(세 번 눌러야 완료). in-progress는 여전히 유효한 값이지만(LLM이 문맥상
+    이미 진행 중이라고 추론한 경우 등) 사용자가 클릭으로 거쳐가는 중간 단계는 아니다 —
+    완료가 아니면 무조건 완료로, 완료면 대기로 되돌린다."""
     conn = get_connection()
     try:
         row = conn.execute(
@@ -224,10 +227,7 @@ def toggle_action_item_status(user_id: int, item_id: int) -> Optional[dict]:
         ).fetchone()
         if not row:
             return None
-        # 과거에 저장된 값이 영문 3종(pending/in-progress/completed)이 아닐 수도 있으니
-        # (예: 정규화 이전에 저장된 한국어 status) 못 찾으면 처음(pending)부터 순환 시작
-        current_index = STATUS_CYCLE.index(row["status"]) if row["status"] in STATUS_CYCLE else -1
-        next_status = STATUS_CYCLE[(current_index + 1) % len(STATUS_CYCLE)]
+        next_status = "pending" if row["status"] == "completed" else "completed"
         conn.execute(
             "UPDATE action_items SET status = ?, user_modified = 1 WHERE id = ? AND user_id = ?",
             (next_status, item_id, user_id),

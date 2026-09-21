@@ -7,6 +7,7 @@ import { getAllActionItems, toggleActionItemStatus, deleteActionItem } from '../
 export default function ActionItemsView() {
   const [items, setItems] = useState([]);
   const [error, setError] = useState('');
+  const [filter, setFilter] = useState('open'); // 'all' | 'open' | 'completed'
 
   useEffect(() => {
     getAllActionItems()
@@ -27,6 +28,17 @@ export default function ActionItemsView() {
   };
 
   const openCount = items.filter((i) => i.status !== 'completed').length;
+  const completedCount = items.length - openCount;
+  const tabs = [
+    { id: 'open', label: '진행 중', count: openCount },
+    { id: 'completed', label: '완료', count: completedCount },
+    { id: 'all', label: '전체', count: items.length },
+  ];
+  const visibleItems = items.filter((i) => {
+    if (filter === 'open') return i.status !== 'completed';
+    if (filter === 'completed') return i.status === 'completed';
+    return true;
+  });
 
   return (
     <div className="dashboard">
@@ -39,7 +51,7 @@ export default function ActionItemsView() {
             </h1>
           </div>
           <p className="dashboard__hero-subtitle">
-            검색할 때마다 AI가 문서·대화에서 자동으로 뽑아낸 할 일을 한곳에서 관리하세요
+            검색 결과에서 직접 고른 할 일을 체크박스 하나로 관리하세요
           </p>
         </div>
       </div>
@@ -50,34 +62,51 @@ export default function ActionItemsView() {
           <span className="dashboard__card-badge">{openCount}개 진행 중</span>
         </div>
         {items.length > 0 && (
-          <div className="ai-panel__action-legend">
-            동그라미를 클릭하면 상태가 바뀝니다 —
-            <span className="ai-panel__action-legend-item"><span className="ai-panel__action-status ai-panel__action-status--pending ai-panel__action-status--mini">○</span> 대기</span>
-            <span className="ai-panel__action-legend-item"><span className="ai-panel__action-status ai-panel__action-status--in-progress ai-panel__action-status--mini">◐</span> 진행 중</span>
-            <span className="ai-panel__action-legend-item"><span className="ai-panel__action-status ai-panel__action-status--completed ai-panel__action-status--mini">✓</span> 완료</span>
+          <div className="action-items__tabs">
+            {tabs.map((tab) => (
+              <button
+                key={tab.id}
+                className={`action-items__tab ${filter === tab.id ? 'action-items__tab--active' : ''}`}
+                onClick={() => setFilter(tab.id)}
+              >
+                {tab.label}
+                <span className="action-items__tab-count">{tab.count}</span>
+              </button>
+            ))}
           </div>
         )}
         {error && <p className="dashboard__empty" role="alert">⚠️ {error}</p>}
         <div className="ai-panel__action-list">
           {items.length === 0 && !error && (
             <p className="dashboard__empty">
-              아직 할 일이 없습니다. 통합 검색을 실행하면 AI가 자동으로 추출해서 여기 쌓입니다.
+              아직 할 일이 없습니다. 검색 결과의 "할 일 리스트" 탭에서 "+ 추가"를 누르면 여기 쌓입니다.
             </p>
           )}
-          {items.map((item) => {
+          {items.length > 0 && visibleItems.length === 0 && (
+            <p className="dashboard__empty">
+              {filter === 'completed' ? '완료한 할 일이 아직 없습니다.' : '진행 중인 할 일이 없습니다.'}
+            </p>
+          )}
+          {visibleItems.map((item) => {
             const source = getSourceMeta(item.source);
+            const isDone = item.status === 'completed';
             return (
               <div key={item.id} className="ai-panel__action-item">
                 <button
-                  className={`ai-panel__action-status ai-panel__action-status--${item.status}`}
-                  style={{ padding: 0, fontFamily: 'inherit', cursor: 'pointer' }}
+                  className={`action-items__checkbox ${isDone ? 'action-items__checkbox--checked' : ''}`}
                   onClick={() => handleToggle(item.id)}
-                  title="클릭해서 상태 변경"
+                  title={isDone ? '완료 취소' : '완료로 표시'}
+                  aria-label={isDone ? '완료 취소' : '완료로 표시'}
                 >
-                  {item.status === 'completed' ? '✓' : item.status === 'in-progress' ? '◐' : '○'}
+                  {isDone && '✓'}
                 </button>
-                <div className="ai-panel__action-content">
-                  <div className="ai-panel__action-task">{item.task}</div>
+                <div className={`ai-panel__action-content ${isDone ? 'action-items__content--done' : ''}`}>
+                  <div className="ai-panel__action-task">
+                    {item.task}
+                    {item.status === 'in-progress' && !isDone && (
+                      <span className="action-items__inprogress-badge">진행 중</span>
+                    )}
+                  </div>
                   <div className="ai-panel__action-meta">
                     <span>👤 {item.assignee}</span>
                     <span>📅 {item.dueDate}</span>

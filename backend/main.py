@@ -27,7 +27,7 @@ from models import (
     SearchResponse, StatsResponse,
     SignupRequest, LoginRequest, AuthResponse, MeResponse,
     LinkedAccount, SearchHistoryItem, ActionItemRecord, SearchCountResponse,
-    AuthorizeUrlResponse, SyncStatusItem, SyncStatusResponse,
+    AuthorizeUrlResponse, SyncStatusItem, SyncStatusResponse, SaveActionItemRequest,
 )
 import rag_pipeline
 import db
@@ -385,6 +385,14 @@ def search_history_count(days: int = 7, authorization: Optional[str] = Header(No
 @app.get("/api/v1/action-items", response_model=list[ActionItemRecord])
 def action_items(authorization: Optional[str] = Header(None)):
     user = _require_user(authorization)
+    return db.get_action_items(user["id"])
+
+
+@app.post("/api/v1/action-items", response_model=list[ActionItemRecord])
+def save_action_item(body: SaveActionItemRequest, authorization: Optional[str] = Header(None)):
+    """검색 결과에 후보로 뜬 할 일 중 사용자가 직접 고른 것만 저장한다(자동 저장 폐지)."""
+    user = _require_user(authorization)
+    db.upsert_action_items(user["id"], body.query, [body.item.model_dump()])
     return db.get_action_items(user["id"])
 
 
@@ -867,8 +875,10 @@ def search_documents(
                 degradedSources=degraded,
             )
 
-        if summary_dict.get("actionItems"):
-            db.upsert_action_items(user["id"], q, summary_dict["actionItems"])
+        # 예전엔 검색할 때마다 추출된 할 일을 전부 자동 저장했는데, 그 결과 테스트 삼아 돌린
+        # 검색("asdfqwer123" 등)까지 할 일 목록에 영구적으로 쌓였다. 이제는 검색 결과에
+        # 후보로만 보여주고(summary.actionItems), 사용자가 직접 고른 것만
+        # POST /api/v1/action-items로 저장한다.
 
         return SearchResponse(
             documents=formatted_docs,

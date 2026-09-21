@@ -31,4 +31,6 @@ backend/chroma_db
 backend/.env
 backend/gdrive_service_account.json
 backend/app.db
+backend/app.db-shm
+backend/app.db-wal
 *.pyc

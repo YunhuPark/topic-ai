@@ -14,6 +14,7 @@ Topic Thread AI의 공통 문서 포맷(dict)으로 변환한다. 쓰기 작업�
    (Notion의 "페이지 공유"처럼, 여기 명시한 저장소만 읽는다)
 """
 
+import base64
 import os
 import time
 from collections import defaultdict
@@ -195,6 +196,81 @@ def _repo_to_document(owner: str, repo: str, meta: dict, headers: dict) -> dict:
     }
 
 
+# 저장소 파일 하나당 색인 상한 — 없으면 대형 저장소 하나가 동기화 주기를 통째로 잡아먹는다.
+GITHUB_MAX_FILES_PER_REPO = 500
+# 본문을 읽기엔 너무 큰 파일(생성된 번들 등) 기준 — 이보다 크면 파일명만 색인한다.
+_MAX_FILE_BYTES = 200_000
+# 내용은 진짜 코드지만 순수 자동 생성물이라 검색 가치가 없는 잠금 파일 — 파일명만 색인한다.
+_LOCK_FILENAMES = {
+    "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "cargo.lock",
+    "poetry.lock", "pipfile.lock", "composer.lock", "gemfile.lock",
+}
+
+
+def repo_file_document_id(owner: str, repo: str, path: str) -> str:
+    return f"github-{owner}/{repo}::{path}"
+
+
+def _list_repo_tree(owner: str, repo: str, default_branch: str, headers: dict) -> list[dict]:
+    """기본 브랜치의 전체 파일 트리(파일만, blob 타입)를 가져온다. .gitignore된 파일은
+    git 자체가 안 갖고 있어서 애초에 여기 안 잡힌다 — Drive처럼 별도로 걸러낼 필요가 적다."""
+    try:
+        resp = _request(
+            "GET", f"/repos/{owner}/{repo}/git/trees/{default_branch}", headers,
+            params={"recursive": "1"},
+        ).json()
+    except requests.HTTPError as e:
+        if e.response is not None and e.response.status_code == 404:
+            return []  # 커밋이 없는 빈 저장소
+        raise
+    if resp.get("truncated"):
+        print(f"'{owner}/{repo}' 파일 트리가 너무 커서 GitHub API가 일부만 내려줬습니다.")
+    return [item for item in resp.get("tree", []) if item.get("type") == "blob"]
+
+
+def _fetch_blob_text(owner: str, repo: str, sha: str, headers: dict) -> Optional[str]:
+    """None이면 본문을 못 읽는(또는 안 읽는) 파일이라는 뜻 — 바이너리거나 너무 큼."""
+    blob = _request("GET", f"/repos/{owner}/{repo}/git/blobs/{sha}", headers).json()
+    if blob.get("encoding") != "base64":
+        return None
+    raw = base64.b64decode(blob["content"])
+    if len(raw) > _MAX_FILE_BYTES or b"\x00" in raw[:8000]:  # null byte = 거의 확실히 바이너리
+        return None
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def _file_to_document(owner: str, repo: str, item: dict, headers: dict, repo_meta: dict) -> dict:
+    path = item["path"]
+    name = path.rsplit("/", 1)[-1].lower()
+    content = None if name in _LOCK_FILENAMES else _fetch_blob_text(owner, repo, item["sha"], headers)
+    if content is None:
+        content = f"(미리보기를 지원하지 않는 파일이라 본문 내용은 없습니다 — 파일명으로만 검색됩니다: {path})"
+
+    # git tree API는 파일별 커밋 시각을 안 줘서(주면 파일당 API 호출이 하나 더 필요해 비용이
+    # 커짐), 저장소 전체의 마지막 push 시각으로 근사한다 — 파일별 정확한 날짜는 아니다.
+    branch_pushed_at = repo_meta.get("pushed_at") or repo_meta.get("updated_at") or ""
+    branch = repo_meta.get("default_branch", "main")
+
+    return {
+        "id": repo_file_document_id(owner, repo, path),
+        "title": f"{owner}/{repo} — {path}",
+        "source": "github",
+        "author": owner,
+        "authorAvatar": owner[:2],
+        "date": (branch_pushed_at or "")[:10] or "1970-01-01",
+        "content": content,
+        "tags": ["github", f"{owner}/{repo}", "file"],
+        "freshness": "fresh",
+        "relevance": 1.0,
+        "sourceUrl": f"https://github.com/{owner}/{repo}/blob/{branch}/{path}",
+        # blob sha 자체가 내용 해시라 시각보다 더 정확한 변경 감지 기준이 된다.
+        "sourceUpdatedAt": item["sha"],
+    }
+
+
 def _fetch_repo_documents(
     owner: str, repo: str, since_iso: str, headers: dict, known: Optional[dict[str, str]] = None
 ) -> tuple[list[dict], set[str]]:
@@ -211,6 +287,22 @@ def _fetch_repo_documents(
     repo_updated_at = repo_meta.get("pushed_at") or repo_meta.get("updated_at") or ""
     if not (repo_updated_at and known.get(repo_doc_id) == repo_updated_at):
         documents.append(_repo_to_document(owner, repo, repo_meta, headers))
+
+    # 저장소 파일 전체 — README뿐 아니라 실제 소스 코드/설정도 검색 대상이 돼야 한다는 요구.
+    default_branch = repo_meta.get("default_branch", "main")
+    tree = _list_repo_tree(owner, repo, default_branch, headers)
+    if len(tree) > GITHUB_MAX_FILES_PER_REPO:
+        print(f"'{owner}/{repo}' 파일이 {len(tree)}개라 상한({GITHUB_MAX_FILES_PER_REPO})까지만 색인합니다.")
+        tree = tree[:GITHUB_MAX_FILES_PER_REPO]
+    for item in tree:
+        file_doc_id = repo_file_document_id(owner, repo, item["path"])
+        seen_ids.add(file_doc_id)
+        if known.get(file_doc_id) == item["sha"]:
+            continue  # blob sha가 그대로 → 내용도 그대로
+        try:
+            documents.append(_file_to_document(owner, repo, item, headers, repo_meta))
+        except Exception as e:
+            print(f"'{owner}/{repo}' 파일 '{item['path']}' 읽기 실패, 건너뜁니다: {e}")
 
     for issue in _list_recent_issues(owner, repo, since_iso, headers):
         doc_id = issue_document_id(owner, repo, issue["number"])
@@ -277,8 +369,9 @@ def fetch_github_documents_for_user(
             # 다만 "못 본 것"과 "원본에서 사라진 것"은 구별해야 한다 — 확인에 실패한 저장소의
             # 기존 문서들은 그대로 있는 것으로 쳐서, 일시적 오류 때문에 삭제되지 않게 한다.
             print(f"'{repo_full}' 수집 실패, 이번 주기에는 건너뜁니다: {e}")
-            prefix = f"github-{owner}/{repo}#"
-            seen_ids |= {doc_id for doc_id in known if doc_id.startswith(prefix)}
+            # Issue/PR/저장소개요('#')와 파일('::') 두 id 체계 모두 살아있는 것으로 되돌려야 한다.
+            prefixes = (f"github-{owner}/{repo}#", f"github-{owner}/{repo}::")
+            seen_ids |= {doc_id for doc_id in known if doc_id.startswith(prefixes)}
             continue
         documents.extend(repo_docs)
         seen_ids |= repo_seen

@@ -72,13 +72,18 @@ class OpenAIDirectEmbeddings(Embeddings):
         vectors: List[List[float]] = []
         for start in range(0, len(texts), self.batch_size):
             batch = [_truncate_for_embedding(t) for t in texts[start:start + self.batch_size]]
-            for attempt in range(3):
+            for attempt in range(5):
                 try:
                     resp = client.embeddings.create(model=self.model, input=batch)
                     break
                 except Exception as e:
-                    # 상한을 넘긴 경우엔 더 짧게 잘라 다시 시도 (어림치가 빗나간 경우 대비)
-                    if "maximum context length" in str(e) and attempt < 2:
+                    # 상한을 넘긴 경우엔 더 짧게 잘라 다시 시도(어림치가 빗나간 경우 대비) —
+                    # 실제로 어림치 통과 후("under 7500 tokens") 진짜 토큰 수는 8192를 넘겨
+                    # 그대로 실패한 사례 발생(GitHub 코드 파일, 한글 비중 높은 텍스트에서
+                    # 문자당 토큰 어림치가 실제보다 낮게 잡힘). "maximum context length"
+                    # 문구만 보던 걸 "maximum input length" 등 다른 표현도 잡게 넓혔다.
+                    msg = str(e).lower()
+                    if "maximum" in msg and "token" in msg and attempt < 4:
                         batch = [t[: max(1, len(t) // 2)] for t in batch]
                         continue
                     raise

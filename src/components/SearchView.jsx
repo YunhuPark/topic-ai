@@ -74,7 +74,7 @@ export default function SearchView({
             <TopicThread documents={documents} onDocSelect={onDocSelect} selectedDoc={selectedDoc} />
           </div>
           <div className="app__results-right glass-panel">
-            <AISummaryPanel summary={summary} selectedDoc={selectedDoc} />
+            <AISummaryPanel summary={summary} selectedDoc={selectedDoc} searchQuery={searchQuery} />
           </div>
         </div>
       )}

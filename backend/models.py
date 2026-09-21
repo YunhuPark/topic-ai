@@ -115,3 +115,10 @@ class ActionItemRecord(BaseModel):
     status: str
     source: str
     saved_at: str
+
+class SaveActionItemRequest(BaseModel):
+    # 검색 결과(summary.actionItems)에서 사용자가 직접 고른 항목 하나를 저장할 때 쓴다 —
+    # 어느 검색에서 나온 항목인지도 같이 필요하다(action_items 테이블의 유니크 키가
+    # user_id+query+source_item_id 조합이라서).
+    query: str
+    item: ActionItem
