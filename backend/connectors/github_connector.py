@@ -26,14 +26,13 @@ GITHUB_LOOKBACK_DAYS = 90
 
 
 def _headers(token: Optional[str] = None) -> dict:
-    """token을 명시하면 그 값을 그대로 쓰고(계정 연동 시 저장해둔 사용자 본인 OAuth 토큰),
-    안 주면 기존처럼 .env의 관리자 PAT(GITHUB_TOKEN)를 쓴다 — CLI 수집 경로는 그대로 유지."""
-    if not token:
-        token = os.getenv("GITHUB_TOKEN")
-        if not token or token == "your_github_token_here":
-            raise RuntimeError(
-                "GITHUB_TOKEN이 설정되지 않았습니다. backend/.env 에 GitHub Personal Access Token을 입력하세요."
-            )
+    """token을 명시하면 그 토큰(계정 연동으로 받은 사용자 본인 access token)을 쓰고,
+    없으면 관리자가 .env에 미리 넣어둔 정적 GITHUB_TOKEN을 쓴다."""
+    token = token or os.getenv("GITHUB_TOKEN")
+    if not token or token == "your_github_token_here":
+        raise RuntimeError(
+            "GITHUB_TOKEN이 설정되지 않았습니다. backend/.env 에 GitHub Personal Access Token을 입력하세요."
+        )
     return {
         "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github+json",
@@ -51,11 +50,11 @@ def _get_target_repos() -> list[str]:
     return repos
 
 
-def _request(method: str, path: str, token: Optional[str] = None, **kwargs) -> requests.Response:
+def _request(method: str, path: str, headers: dict, **kwargs) -> requests.Response:
     """GitHub API 요청 공통 래퍼. rate limit이면 X-RateLimit-Reset까지 기다렸다 재시도."""
     url = f"{GITHUB_API_BASE}{path}" if path.startswith("/") else path
     for attempt in range(3):
-        resp = requests.request(method, url, headers=_headers(token), timeout=30, **kwargs)
+        resp = requests.request(method, url, headers=headers, timeout=30, **kwargs)
         if resp.status_code == 403 and resp.headers.get("X-RateLimit-Remaining") == "0":
             reset_at = int(resp.headers.get("X-RateLimit-Reset", time.time() + 5))
             wait = max(reset_at - time.time(), 1)
@@ -67,47 +66,47 @@ def _request(method: str, path: str, token: Optional[str] = None, **kwargs) -> r
     return resp
 
 
-def _paginate(path: str, params: dict, token: Optional[str] = None) -> list[dict]:
+def _paginate(path: str, params: dict, headers: dict) -> list[dict]:
     """GitHub의 Link 헤더 기반 페이지네이션을 따라간다."""
     results = []
     url: Optional[str] = f"{GITHUB_API_BASE}{path}"
     query = dict(params)
     while url:
-        resp = _request("GET", url, token=token, params=query)
+        resp = _request("GET", url, headers, params=query)
         results.extend(resp.json())
         query = {}  # next 링크에 파라미터가 이미 포함돼 있음
         url = resp.links.get("next", {}).get("url")
     return results
 
 
-def _list_recent_issues(owner: str, repo: str, since_iso: str, token: Optional[str] = None) -> list[dict]:
+def _list_user_repos(headers: dict) -> list[str]:
+    """이 토큰 소유자 본인이 접근 가능한 저장소 전체(소유+협업+소속 조직)를 나열한다.
+    .env의 GITHUB_REPOS처럼 관리자가 미리 정해둔 고정 목록이 아니라, 계정 연동 시점에
+    그 사람이 실제로 볼 수 있는 저장소를 자동으로 대상으로 삼기 위함."""
+    repos = _paginate(
+        "/user/repos",
+        {"per_page": 100, "affiliation": "owner,collaborator,organization_member", "sort": "updated"},
+        headers,
+    )
+    return [r["full_name"] for r in repos if not r.get("archived")]
+
+
+def _list_recent_issues(owner: str, repo: str, since_iso: str, headers: dict) -> list[dict]:
     """Issue와 PR을 함께 반환한다 (GitHub API 특성). pull_request 키 유무로 구분 가능."""
     return _paginate(
         f"/repos/{owner}/{repo}/issues",
         {"state": "all", "since": since_iso, "per_page": 100, "sort": "updated"},
-        token=token,
+        headers,
     )
 
 
-def _list_comments(owner: str, repo: str, issue_number: int, since_iso: str, token: Optional[str] = None) -> list[dict]:
+def _list_comments(owner: str, repo: str, issue_number: int, since_iso: str, headers: dict) -> list[dict]:
     comments = _paginate(
         f"/repos/{owner}/{repo}/issues/{issue_number}/comments",
         {"since": since_iso, "per_page": 100},
-        token=token,
+        headers,
     )
     return [c for c in comments if (c.get("user") or {}).get("type") != "Bot"]
-
-
-def _list_user_repos(token: str) -> list[str]:
-    """이 토큰(계정 연동 시 저장해둔 사용자 본인 OAuth 토큰)으로 접근 가능한 저장소 전체를
-    자동으로 찾는다 — GITHUB_REPOS 같은 고정 목록을 안 써도 되게 하는 함수. fork/archived는
-    노이즈가 많아서 제외한다."""
-    repos = _paginate(
-        "/user/repos",
-        {"per_page": 100, "affiliation": "owner,collaborator,organization_member", "sort": "updated"},
-        token=token,
-    )
-    return [r["full_name"] for r in repos if not r.get("fork") and not r.get("archived")]
 
 
 def _format_entry(author: str, iso_time: str, text: str) -> str:
@@ -118,7 +117,9 @@ def _format_entry(author: str, iso_time: str, text: str) -> str:
 def _issue_to_document(owner: str, repo: str, issue: dict, comments: list[dict]) -> dict:
     is_pr = "pull_request" in issue
     author = (issue.get("user") or {}).get("login", "알 수 없음")
-    date = (issue.get("created_at") or "")[:10] or "1970-01-01"
+    # 생성 시점이 아니라 마지막 활동 시점(updated_at)을 문서 날짜로 써야 "최근" 판정이 맞다 —
+    # 오래전에 만든 Issue/PR이라도 최근에 댓글이 달렸으면 여전히 최신 논의로 취급해야 함
+    date = (issue.get("updated_at") or issue.get("created_at") or "")[:10] or "1970-01-01"
     kind = "PR" if is_pr else "Issue"
     title = f"{owner}/{repo}#{issue['number']} — {issue.get('title', '제목 없음')}"
 
@@ -128,7 +129,7 @@ def _issue_to_document(owner: str, repo: str, issue: dict, comments: list[dict])
         lines.append(_format_entry(c_author, c["created_at"], c.get("body") or ""))
 
     return {
-        "id": f"github-{owner}-{repo}-{issue['number']}",
+        "id": issue_document_id(owner, repo, issue["number"]),
         "title": title,
         "source": "github",
         "author": author,
@@ -139,10 +140,47 @@ def _issue_to_document(owner: str, repo: str, issue: dict, comments: list[dict])
         "freshness": "fresh",
         "relevance": 1.0,
         "sourceUrl": issue.get("html_url", ""),
+        "sourceUpdatedAt": issue.get("updated_at") or "",
     }
 
 
-def _fetch_documents_for_repos(repos: list[str], token: Optional[str] = None) -> list[dict]:
+def issue_document_id(owner: str, repo: str, number: int) -> str:
+    """대시로만 이어붙이면 (my-org, web)과 (my, org-web)이 같은 id가 돼 서로 덮어쓴다.
+    저장소 이름에 못 들어가는 '/'와 '#'를 구분자로 써서 충돌을 없앤다."""
+    return f"github-{owner}/{repo}#{number}"
+
+
+def _fetch_repo_documents(
+    owner: str, repo: str, since_iso: str, headers: dict, known: Optional[dict[str, str]] = None
+) -> tuple[list[dict], set[str]]:
+    """(본문을 새로 가져온 문서들, 이 저장소에서 본 전체 문서 id)."""
+    known = known or {}
+    documents = []
+    seen_ids = set()
+
+    for issue in _list_recent_issues(owner, repo, since_iso, headers):
+        doc_id = issue_document_id(owner, repo, issue["number"])
+        seen_ids.add(doc_id)
+
+        updated_at = issue.get("updated_at") or ""
+        if updated_at and known.get(doc_id) == updated_at:
+            continue  # 마지막 동기화 이후 바뀐 게 없으면 댓글 조회도 건너뛴다
+
+        # 댓글이 0개인 이슈까지 매번 댓글 API를 부르느라 주기당 호출 수의 대부분이 낭비됐다.
+        comments = (
+            _list_comments(owner, repo, issue["number"], since_iso, headers)
+            if issue.get("comments", 0) > 0
+            else []
+        )
+        documents.append(_issue_to_document(owner, repo, issue, comments))
+
+    return documents, seen_ids
+
+
+def fetch_github_documents() -> list[dict]:
+    """GITHUB_REPOS에 지정된 저장소의 최근 Issue/PR을 공통 문서 포맷으로 변환해 반환한다."""
+    headers = _headers()
+    repos = _get_target_repos()
     since_iso = (datetime.now(tz=timezone.utc) - timedelta(days=GITHUB_LOOKBACK_DAYS)).strftime(
         "%Y-%m-%dT%H:%M:%SZ"
     )
@@ -153,24 +191,44 @@ def _fetch_documents_for_repos(repos: list[str], token: Optional[str] = None) ->
         if not repo:
             print(f"'{repo_full}'는 'owner/repo' 형식이 아니라 건너뜁니다.")
             continue
-        issues = _list_recent_issues(owner, repo, since_iso, token=token)
-        for issue in issues:
-            comments = _list_comments(owner, repo, issue["number"], since_iso, token=token)
-            documents.append(_issue_to_document(owner, repo, issue, comments))
+        repo_docs, _ = _fetch_repo_documents(owner, repo, since_iso, headers)
+        documents.extend(repo_docs)
     return documents
 
 
-def fetch_github_documents() -> list[dict]:
-    """GITHUB_REPOS에 지정된 저장소의 최근 Issue/PR을 공통 문서 포맷으로 변환해 반환한다
-    (관리자가 미리 지정한 고정 목록 — .env의 GITHUB_TOKEN을 쓴다)."""
-    return _fetch_documents_for_repos(_get_target_repos())
+def fetch_github_documents_for_user(
+    access_token: str, known: Optional[dict[str, str]] = None
+) -> tuple[list[dict], set[str]]:
+    """계정 연동으로 받은 이 사람 본인의 access token으로, 이 사람이 실제 접근 가능한
+    저장소 전체의 최근 Issue/PR을 가져온다. fetch_github_documents()(관리자가 .env에
+    미리 정해둔 고정 목록)와 달리 대상 저장소 자체를 매번 새로 나열한다.
 
+    known({id: 지난번 updated_at})을 주면 바뀐 Issue/PR만 본문·댓글을 받아온다."""
+    headers = _headers(access_token)
+    since_iso = (datetime.now(tz=timezone.utc) - timedelta(days=GITHUB_LOOKBACK_DAYS)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
 
-def fetch_github_documents_for_token(token: str) -> list[dict]:
-    """계정 연동 시 저장해둔 사용자 본인 OAuth 토큰으로, 그 사람이 접근 가능한 저장소 전체를
-    자동으로 찾아 Issue/PR을 수집한다 — GITHUB_REPOS 고정 목록이 필요 없다."""
-    repos = _list_user_repos(token)
-    return _fetch_documents_for_repos(repos, token=token)
+    known = known or {}
+    documents = []
+    seen_ids = set()
+    for repo_full in _list_user_repos(headers):
+        owner, _, repo = repo_full.partition("/")
+        if not repo:
+            continue
+        try:
+            repo_docs, repo_seen = _fetch_repo_documents(owner, repo, since_iso, headers, known)
+        except Exception as e:
+            # 저장소 하나가 404/500이라고 해서 나머지 저장소 수집까지 죽으면 안 된다.
+            # 다만 "못 본 것"과 "원본에서 사라진 것"은 구별해야 한다 — 확인에 실패한 저장소의
+            # 기존 문서들은 그대로 있는 것으로 쳐서, 일시적 오류 때문에 삭제되지 않게 한다.
+            print(f"'{repo_full}' 수집 실패, 이번 주기에는 건너뜁니다: {e}")
+            prefix = f"github-{owner}/{repo}#"
+            seen_ids |= {doc_id for doc_id in known if doc_id.startswith(prefix)}
+            continue
+        documents.extend(repo_docs)
+        seen_ids |= repo_seen
+    return documents, seen_ids
 
 
 if __name__ == "__main__":

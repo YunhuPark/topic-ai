@@ -395,3 +395,25 @@
   animation: typing 0.8s steps(1) infinite;
   font-weight: 300;
 }
+
+/* 할 일 삭제 버튼 — 잘못 추출된 항목을 지울 방법이 아예 없던 문제 보완 */
+.ai-panel__action-delete {
+  background: none;
+  border: none;
+  color: var(--color-text-secondary, #9ca3af);
+  cursor: pointer;
+  font-size: 0.85rem;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm, 4px);
+  opacity: 0;
+  transition: opacity 0.15s ease, background 0.15s ease;
+}
+
+.ai-panel__action-item:hover .ai-panel__action-delete {
+  opacity: 1;
+}
+
+.ai-panel__action-delete:hover {
+  background: rgba(239, 68, 68, 0.12);
+  color: #ef4444;
+}

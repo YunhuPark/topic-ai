@@ -37,6 +37,10 @@ class Summary(BaseModel):
 class SearchResponse(BaseModel):
     documents: List[Document]
     summary: Summary
+    # 권한 확인이 "권한 없음"이 아니라 "토큰 만료/일시적 실패"로 끝난 소스들 — 문서가 조용히
+    # 사라지는 대신 프론트가 재연결 안내를 띄울 수 있게 함께 내려준다.
+    disconnectedSources: List[str] = []
+    degradedSources: List[str] = []
 
 class SourceCount(BaseModel):
     source: str
@@ -75,9 +79,6 @@ class AuthResponse(BaseModel):
 class MeResponse(BaseModel):
     id: int
     email: str
-
-class LinkGoogleRequest(BaseModel):
-    accessToken: str
 
 class LinkedAccount(BaseModel):
     provider: str

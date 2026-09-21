@@ -1,8 +1,6 @@
 // 검색 기록은 브라우저가 아니라 계정(백엔드 DB)에 귀속된다 — 검색 자체가 로그인 필수라
-// 항상 getAuthHeader()가 유효한 상태에서 호출된다는 전제.
-import { getAuthHeader } from './authStore';
-
-const API_BASE = 'http://localhost:8000';
+// 항상 유효한 세션에서 호출된다는 전제.
+import { apiFetch } from './apiClient';
 
 function formatRelativeTime(isoString) {
   const diffMs = Date.now() - new Date(isoString).getTime();
@@ -16,11 +14,11 @@ function formatRelativeTime(isoString) {
   return `${days}일 전`;
 }
 
+// 이 둘은 화면 한 켠의 보조 정보(최근 검색, 이번 주 검색 수)라, 실패해도 화면 전체를 막지 않고
+// 빈 값으로 둔다. 단 401이면 apiFetch가 세션 만료 처리를 먼저 수행한다.
 export async function getRecentSearches() {
   try {
-    const res = await fetch(`${API_BASE}/api/v1/search-history`, { headers: getAuthHeader() });
-    if (!res.ok) return [];
-    const rows = await res.json();
+    const rows = await apiFetch('/api/v1/search-history');
     return rows.map((r) => ({ query: r.query, time: formatRelativeTime(r.searched_at) }));
   } catch {
     return [];
@@ -29,12 +27,7 @@ export async function getRecentSearches() {
 
 export async function countSearchesSince(days) {
   try {
-    const res = await fetch(
-      `${API_BASE}/api/v1/search-history/count?days=${days}`,
-      { headers: getAuthHeader() }
-    );
-    if (!res.ok) return 0;
-    const data = await res.json();
+    const data = await apiFetch(`/api/v1/search-history/count?days=${days}`);
     return data.count;
   } catch {
     return 0;

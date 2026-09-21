@@ -4,6 +4,9 @@
 
 기획 배경과 시장조사는 [PLANNING.md](PLANNING.md), 기능 요구사항·완료 기준은 [PRD.md](PRD.md)를 참고하세요.
 
+> **다른 노트북에서 이어서 작업한다면 [HANDOFF.md](HANDOFF.md)를 먼저 읽으세요** —
+> `.env`/`app.db`/`chroma_db`는 git에 없어서 그대로 clone만 하면 앱이 안 돕니다.
+
 ## 구조
 
 ```
@@ -92,12 +95,16 @@ python rag_pipeline.py --source gitlab
 4. 검색되길 원하는 채널에서 `/invite @앱이름`으로 봇 초대
 5. 최근 90일 이내 메시지만 대상 (`connectors/slack_connector.py`의 `SLACK_LOOKBACK_DAYS`로 조정 가능)
 
-### Google Drive (Google Docs만 지원)
-1. [console.cloud.google.com](https://console.cloud.google.com)에서 프로젝트 생성 → "Google Drive API" 활성화
+### Google Drive (Docs/Sheets/Slides/PDF/DOCX/XLSX/PPTX/HWPX 지원)
+1. [console.cloud.google.com](https://console.cloud.google.com)에서 프로젝트 생성 → "Google Drive API"와
+   "Google Sheets API" 둘 다 활성화 (Sheets 문서를 읽으려면 Sheets API도 켜야 함)
 2. IAM 및 관리자 → 서비스 계정 → 서비스 계정 만들기 (역할 부여 단계는 건너뛰기)
 3. 만든 서비스 계정 → 키 → 새 키 만들기 → JSON → 다운로드
 4. 다운받은 파일을 `backend/gdrive_service_account.json`으로 저장
-5. 서비스 계정 이메일(`...@...iam.gserviceaccount.com`)을 검색되길 원하는 Google Docs에 뷰어로 공유
+5. 서비스 계정 이메일(`...@...iam.gserviceaccount.com`)을 검색되길 원하는 파일에 뷰어로 공유
+
+> 레거시 바이너리 `.hwp`(2014년 이전 한글 포맷)와 구버전 MS Office(`.doc`/`.xls`/`.ppt`), 스캔
+> 이미지로만 된 PDF는 지원하지 않습니다 — 최신 포맷(HWPX 등)으로 다시 저장하거나 PDF로 내보내면 됩니다.
 
 ### GitHub (Issues/PR만 지원)
 1. [github.com/settings/tokens](https://github.com/settings/tokens)에서 Personal Access Token 발급
@@ -122,7 +129,6 @@ python rag_pipeline.py --source gitlab
 | `POST /api/v1/auth/link/google` | Google access token 검증 후 계정에 연결 |
 | `GET /api/v1/auth/link/{github\|gitlab\|slack\|notion}/start` / `.../callback` | GitHub/GitLab/Slack/Notion OAuth 연결 시작/콜백 |
 | `GET /api/v1/auth/linked` | 이 계정에 연결된 외부 소스 목록 |
-| `POST /api/v1/sync/{github\|gitlab\|slack\|notion}` | 그 계정 본인 토큰으로 실제 볼 수 있는 저장소/프로젝트/채널/페이지 전체를 자동으로 찾아 색인(계정 연결 직후 프론트가 자동 호출) |
 | `GET /api/v1/search-history`, `GET /api/v1/action-items` | 계정에 귀속된 검색 기록/액션아이템 조회 |
 
 ## 계정 / 권한 인지형 검색
@@ -134,40 +140,35 @@ python rag_pipeline.py --source gitlab
 사이드바에서 각각 계정을 연결하면, 그 사람이 실제로 접근 가능한 문서/저장소/프로젝트/채널/페이지만
 검색에 노출됩니다 (연결 안 하면 그 소스는 결과에서 아예 빠집니다 — 기본 거부).
 
-**GitHub/GitLab/Slack/Notion은 연결하는 순간 그 계정 본인 토큰으로 자동 전체 수집도 함께 일어납니다**
-(`POST /api/v1/sync/{provider}`, 연결 팝업 성공 직후 프론트가 자동 호출) — `.env`의
-`GITHUB_REPOS`/`GITLAB_PROJECTS` 같은 관리자 고정 목록에 없는 저장소/프로젝트라도, 계정만 연결하면
-그 사람이 접근 가능한 전체가 자동으로 검색 대상에 들어갑니다. 재연결("다시 연결" 버튼)해도 안전하게
-재동기화됩니다(같은 id는 덮어쓰고 중복 적재되지 않음). Google Drive만 예외입니다 — 지금 요청하는
-OAuth 스코프(읽기 전용 메타데이터)로는 파일 내용을 못 읽어서 자동 수집은 아직 안 되고, 권한 필터링만
-적용됩니다(파일은 서비스 계정에 개별 공유해야 색인됨).
-
-- **Google Drive**: 로그인 화면 하단 "Google Drive 연결" — access token은 브라우저 세션에만 보관되고
-  수명이 짧아(약 1시간) 세션이 바뀌면 다시 연결해야 할 수 있습니다.
+- **Google Drive**: "Google Drive 연결" — GitHub/GitLab과 같은 표준 OAuth Authorization Code
+  플로우입니다(`GOOGLE_OAUTH_CLIENT_ID`/`SECRET` 필요). refresh_token이 서버에 저장되므로 한 번
+  연결하면 계속 유지되고, 자동 재동기화 대상에도 포함됩니다.
 - **GitHub / GitLab**: "GitHub 연결" / "GitLab 연결" — 둘 다 표준 OAuth Authorization Code 플로우라
   별도로 `GITHUB_OAUTH_CLIENT_ID`/`SECRET`, `GITLAB_OAUTH_CLIENT_ID`/`SECRET`이 `.env`에 필요합니다
   (아래 커넥터용 `GITHUB_TOKEN`/`GITLAB_TOKEN`과는 다른 앱). access token은 서버에 저장되어 한 번
-  연결하면 계속 유지됩니다. **GitLab OAuth 토큰은 기본적으로 일정 시간 후 만료되는데 아직 refresh
-  token 갱신을 구현하지 않아서, 만료되면 "다시 연결"로 재인증해야 합니다** (알려진 제약사항).
+  연결하면 계속 유지됩니다.
 - **Slack**: "Slack 연결" — 수집용 봇(`SLACK_BOT_TOKEN`)과 같은 Slack 앱에 "User Token Scopes"만
   추가하면 됩니다(새 앱 필요 없음). 연결 시 발급되는 건 봇 토큰이 아니라 그 사람 본인 권한을
   나타내는 사용자 토큰이며, 검색 시 `conversations.history`로 그 채널을 실제로 읽을 수 있는지
-  확인합니다 (공개 채널이라도 멤버가 아니면 제외). 자동 수집도 이 사용자 토큰으로 하므로, 봇을
-  채널에 `/invite`하지 않아도 그 사람이 속한 채널은 전부 수집됩니다.
+  확인합니다 (공개 채널이라도 멤버가 아니면 제외).
 - **Notion**: "Notion 연결" — 수집용 `NOTION_TOKEN`(Internal Integration)과는 별개로 **OAuth 타입
   통합**을 새로 만들어야 합니다. 동의 화면에서 그 사람이 직접 "이 통합에 공유할 페이지"를 고르고,
   그렇게 고른 페이지에만 접근 가능한 토큰을 받습니다 — 그래서 수집용 통합으로 이미 공유해둔
-  페이지라도 이 OAuth 연결에서 다시 선택하지 않으면 검색에 노출되지 않습니다. 자동 수집도 이
-  토큰으로 하므로, 동의 화면에서 고른 페이지 전체가 그대로 검색 대상이 됩니다.
+  페이지라도 이 OAuth 연결에서 다시 선택하지 않으면 검색에 노출되지 않습니다.
 
 (PRD.md Phase 6 참고)
 
 ### 계정 연결용 OAuth 앱 설정 (커넥터 설정과 별개)
 
-**Google (Drive 권한 필터링용)**
-1. [console.cloud.google.com](https://console.cloud.google.com) → 프로젝트 → API 및 서비스 → **OAuth 동의 화면** 설정 (외부, 테스트 모드면 테스트 사용자에 본인 계정 추가)
-2. API 및 서비스 → **사용자 인증 정보 → OAuth 클라이언트 ID → 웹 애플리케이션**, 승인된 자바스크립트 원본에 `http://localhost:5173` 추가
-3. 발급된 클라이언트 ID를 프로젝트 루트 `.env`(프론트엔드용, `backend/.env`가 아님)의 `VITE_GOOGLE_CLIENT_ID`에 입력
+**Google (Drive 권한 필터링 + 자동 재동기화용)**
+1. [console.cloud.google.com](https://console.cloud.google.com) → 프로젝트 → "Google Drive API"와
+   "Google Sheets API" 활성화 → API 및 서비스 → **OAuth 동의 화면** 설정 (외부, 테스트 모드면 테스트
+   사용자에 본인 계정 추가 — 검증 안 받은 앱은 테스트 사용자만 로그인 가능)
+2. API 및 서비스 → **사용자 인증 정보 → OAuth 클라이언트 ID → 웹 애플리케이션**, 승인된 리디렉션
+   URI에 `http://localhost:8000/api/v1/auth/link/google/callback` 추가 (GitHub/GitLab과 같은 서버
+   사이드 플로우라, 클라이언트 시크릿이 있는 이 타입이어야 함 — 예전 버전이 쓰던 프론트 전용
+   클라이언트 ID/`VITE_GOOGLE_CLIENT_ID`와는 다름)
+3. 발급된 Client ID/Secret을 `backend/.env`의 `GOOGLE_OAUTH_CLIENT_ID`/`GOOGLE_OAUTH_CLIENT_SECRET`에 입력
 
 **GitHub (저장소 권한 필터링용)**
 1. [github.com/settings/developers](https://github.com/settings/developers) → OAuth Apps → **New OAuth App**
@@ -197,14 +198,23 @@ OAuth 스코프(읽기 전용 메타데이터)로는 파일 내용을 못 읽어
 4. 클라이언트 ID/시크릿(시크릿은 눈 아이콘으로 표시)을 `backend/.env`의
    `NOTION_OAUTH_CLIENT_ID`/`NOTION_OAUTH_CLIENT_SECRET`에 입력
 
+## 자동 재동기화
+
+계정 연동 시점에 그 사람이 접근 가능한 문서 전체를 수집하고, 그 이후로도 **5개 소스 전부**를
+`AUTO_RESYNC_INTERVAL_SECONDS`(기본 900초=15분)마다 백그라운드에서 다시 확인합니다
+(`backend/.env`에서 조정 가능).
+
+재동기화는 **증분**입니다 — 목록 조회는 매번 하지만(원본에서 삭제된 문서를 알아내야 하므로),
+본문을 다시 받아 임베딩하는 건 원본의 수정 시각이나 내용이 실제로 바뀐 문서뿐입니다. 그래서
+문서가 그대로면 주기당 임베딩 비용이 0에 수렴합니다. 원본에서 삭제되거나 접근 권한을 잃은
+문서는 자동으로 정리되고, 사이드바에서 **연동을 해제하면** 그 소스로 가져왔던 문서도 함께
+정리됩니다.
+
 ## 알려진 운영 이슈
 
-- Chroma는 다른 프로세스가 쓴 내용을 자동으로 다시 읽지 않으므로, **오프라인 CLI 수집**(`python rag_pipeline.py --source X`) 후에는 API 서버를 재시작해야 합니다. 단, `POST /api/v1/sync/{provider}`는 API 서버와 같은 프로세스에서 바로 실행되므로 재시작이 필요 없습니다.
+- Chroma는 다른 프로세스가 쓴 내용을 자동으로 다시 읽지 않으므로, 적재 스크립트 실행 후 API 서버를 재시작해야 합니다.
 - Windows 콘솔(cp949)은 이모지를 못 그려서, 로그에 이모지를 쓰면 print 자체가 예외를 던질 수 있습니다 (`main.py`/`rag_pipeline.py` 상단에서 UTF-8로 재설정해 처리 중).
-- Google Drive 커넥터는 Google Docs(`application/vnd.google-apps.document`)만 지원합니다. Sheets/Slides/PDF는 범위 밖입니다.
-- 검색은 관련도(`MIN_SEARCH_RELEVANCE`, 기본 0.3) 미만인 결과를 전부 제외합니다 — 색인된 문서 어디에도
-  안 맞는 검색어를 넣으면 억지로 4개를 채우지 않고 정직하게 "결과 없음"을 보여줍니다.
-- GitLab OAuth 계정 연결 토큰은 refresh token 갱신 로직이 아직 없어서, 만료되면 재연결이 필요합니다.
+- Google Drive 커넥터는 Docs/Sheets/Slides/PDF/DOCX/XLSX/PPTX/HWPX를 지원합니다. 스캔 이미지로만 된 PDF, 레거시 `.hwp`, 구버전 MS Office(`.doc`/`.xls`/`.ppt`)는 범위 밖입니다.
 
 ## 프론트엔드 상세
 

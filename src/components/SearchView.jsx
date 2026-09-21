@@ -31,7 +31,7 @@ function SearchLoadingSkeleton() {
 }
 
 export default function SearchView({
-  onSearch, isSearching, hasSearched, searchQuery,
+  onSearch, isSearching, hasSearched, searchQuery, searchError,
   documents, summary, selectedDoc, onDocSelect, topics = [],
 }) {
   const [recentSearches, setRecentSearches] = useState([]);
@@ -40,7 +40,8 @@ export default function SearchView({
     getRecentSearches().then(setRecentSearches);
   }, [hasSearched]);
 
-  const showIdle = !hasSearched && !isSearching;
+  // 오류가 났을 때는 초기 화면으로 되돌리지 않는다 — 이전 결과를 남겨두고 이유를 보여준다
+  const showIdle = !hasSearched && !isSearching && !searchError;
 
   return (
     <div className="app__search-view">
@@ -58,6 +59,11 @@ export default function SearchView({
           <div className="app__search-query-info animate-fade-in">
             <span className="app__search-query-label">검색 결과:</span>
             <span className="app__search-query-text">"{searchQuery}"</span>
+          </div>
+        )}
+        {searchError && (
+          <div className="search-view__error animate-fade-in" role="alert">
+            ⚠️ {searchError}
           </div>
         )}
       </div>
