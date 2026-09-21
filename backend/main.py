@@ -19,7 +19,7 @@ from models import (
     SearchResponse, StatsResponse,
     SignupRequest, LoginRequest, AuthResponse, MeResponse,
     LinkGoogleRequest, LinkedAccount, SearchHistoryItem, ActionItemRecord, SearchCountResponse,
-    AuthorizeUrlResponse,
+    AuthorizeUrlResponse, SyncResponse,
 )
 from dummy_data import mock_documents, mock_summary
 import rag_pipeline
@@ -33,6 +33,11 @@ app = FastAPI(
     description="사내 통합 검색 어시스턴트 API",
     version="0.1.0"
 )
+
+# similarity_search_with_score(k=4)는 실제 관련성과 무관하게 항상 상위 4개를 반환한다 —
+# 검색어가 색인된 문서 어디에도 안 맞아도 "그나마 덜 먼" 문서를 억지로 내놓는 문제가 있어서,
+# 이 기준 미만이면 아예 결과에서 제외한다(정직하게 "결과 없음"을 보여주기 위함).
+MIN_SEARCH_RELEVANCE = 0.3
 
 
 def compute_freshness(date_str: str) -> str:
@@ -200,6 +205,61 @@ def _require_user(authorization: Optional[str]) -> dict:
     if not user:
         raise HTTPException(status_code=401, detail="로그인이 필요합니다.")
     return user
+
+
+# provider별로 "계정 연동 시 저장해둔 사용자 본인 토큰"을 받아 그 사람이 가진 전체
+# 저장소/프로젝트/채널/페이지를 자동 탐색해서 수집하는 함수 매핑 (커넥터 쪽 함수 재사용).
+def _sync_github(token: str) -> list[dict]:
+    from connectors.github_connector import fetch_github_documents_for_token
+    return fetch_github_documents_for_token(token)
+
+
+def _sync_gitlab(token: str) -> list[dict]:
+    from connectors.gitlab_connector import fetch_gitlab_documents_for_token
+    return fetch_gitlab_documents_for_token(token)
+
+
+def _sync_slack(token: str) -> list[dict]:
+    from connectors.slack_connector import fetch_slack_documents_for_token
+    return fetch_slack_documents_for_token(token)
+
+
+def _sync_notion(token: str) -> list[dict]:
+    from connectors.notion_connector import fetch_notion_documents_for_token
+    return fetch_notion_documents_for_token(token)
+
+
+_SYNC_HANDLERS = {
+    "github": _sync_github,
+    "gitlab": _sync_gitlab,
+    "slack": _sync_slack,
+    "notion": _sync_notion,
+}
+
+
+@app.post("/api/v1/sync/{provider}", response_model=SyncResponse)
+def sync_account(provider: str, authorization: Optional[str] = Header(None)):
+    """계정 연동 직후(또는 재연결 시) 프론트에서 호출한다. 고정 목록(GITHUB_REPOS 등)에
+    의존하지 않고, 이 사람이 연동한 계정 본인 토큰으로 실제 볼 수 있는 저장소/프로젝트/채널/
+    페이지 전체를 자동으로 찾아 색인한다. API 서버와 같은 프로세스에서 바로 실행되므로,
+    오프라인 CLI 수집과 달리 서버 재시작 없이 즉시 검색에 반영된다."""
+    user = _require_user(authorization)
+    handler = _SYNC_HANDLERS.get(provider)
+    if not handler:
+        raise HTTPException(status_code=404, detail="지원하지 않는 연동입니다.")
+
+    token = db.get_linked_access_token(user["id"], provider)
+    if not token:
+        raise HTTPException(status_code=400, detail=f"먼저 {provider} 계정을 연결하세요.")
+
+    try:
+        docs = handler(token)
+    except Exception as e:
+        print(f"{provider} 동기화 중 에러: {e}")
+        raise HTTPException(status_code=502, detail=f"{provider} 동기화에 실패했습니다: {e}")
+
+    rag_pipeline.ingest_documents(docs)
+    return SyncResponse(provider=provider, count=len(docs))
 
 
 @app.get("/api/v1/search-history", response_model=list[SearchHistoryItem])
@@ -389,8 +449,13 @@ def search_documents(
         # 프론트엔드 포맷(List[dict])에 맞게 변환 (권한 없는 gdrive 문서는 여기서 제외)
         formatted_docs = []
         visible_docs = []
+        relevant_count = 0  # 권한 필터링 전, 관련도 기준을 통과한 문서 수 (빈 결과 사유 구분용)
         for d, distance in results:
             source = d.metadata.get("source", "notion")
+            relevance = max(0.0, min(1.0, 1 - distance / 2))
+            if relevance < MIN_SEARCH_RELEVANCE:
+                continue
+            relevant_count += 1
             if source == "gdrive":
                 doc_id = d.metadata.get("id", "")
                 file_id = doc_id[len("gdrive-"):] if doc_id.startswith("gdrive-") else None
@@ -428,8 +493,6 @@ def search_documents(
             content = d.metadata.get("content", d.page_content)
             doc_date = d.metadata.get("date", "2026-09-01")
             tags_str = d.metadata.get("tags", "")
-            # Chroma 기본 거리(코사인, 0~2 범위)를 0~1 관련도로 정규화
-            relevance = max(0.0, min(1.0, 1 - distance / 2))
             visible_docs.append(d)
             formatted_docs.append({
                 "id": d.metadata.get("id", "unknown"),
@@ -447,10 +510,14 @@ def search_documents(
             })
 
         if not formatted_docs:
-            # 검색은 됐지만 권한상 보여줄 문서가 하나도 없는 경우 — mock으로 채우지 않고 빈 결과를 그대로 반환
+            # 빈 결과 사유를 구분해서 안내한다 — mock으로 채우지 않고 정직하게 빈 결과를 반환
+            if relevant_count == 0:
+                point = "검색어와 관련성이 높은 문서를 찾지 못했습니다. 다른 검색어로 다시 시도해보세요."
+            else:
+                point = "관련 문서가 있었지만, 현재 계정이 접근 권한을 확인할 수 없어 결과에서 제외됐습니다."
             empty_summary = {
                 "title": "표시할 수 있는 결과가 없습니다",
-                "keyPoints": ["검색된 문서가 있었지만, 현재 계정이 접근 권한을 확인할 수 없어 결과에서 제외됐습니다."],
+                "keyPoints": [point],
                 "decisionTrail": [],
                 "actionItems": [],
             }

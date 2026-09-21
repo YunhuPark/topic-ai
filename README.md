@@ -122,6 +122,7 @@ python rag_pipeline.py --source gitlab
 | `POST /api/v1/auth/link/google` | Google access token 검증 후 계정에 연결 |
 | `GET /api/v1/auth/link/{github\|gitlab\|slack\|notion}/start` / `.../callback` | GitHub/GitLab/Slack/Notion OAuth 연결 시작/콜백 |
 | `GET /api/v1/auth/linked` | 이 계정에 연결된 외부 소스 목록 |
+| `POST /api/v1/sync/{github\|gitlab\|slack\|notion}` | 그 계정 본인 토큰으로 실제 볼 수 있는 저장소/프로젝트/채널/페이지 전체를 자동으로 찾아 색인(계정 연결 직후 프론트가 자동 호출) |
 | `GET /api/v1/search-history`, `GET /api/v1/action-items` | 계정에 귀속된 검색 기록/액션아이템 조회 |
 
 ## 계정 / 권한 인지형 검색
@@ -133,20 +134,31 @@ python rag_pipeline.py --source gitlab
 사이드바에서 각각 계정을 연결하면, 그 사람이 실제로 접근 가능한 문서/저장소/프로젝트/채널/페이지만
 검색에 노출됩니다 (연결 안 하면 그 소스는 결과에서 아예 빠집니다 — 기본 거부).
 
+**GitHub/GitLab/Slack/Notion은 연결하는 순간 그 계정 본인 토큰으로 자동 전체 수집도 함께 일어납니다**
+(`POST /api/v1/sync/{provider}`, 연결 팝업 성공 직후 프론트가 자동 호출) — `.env`의
+`GITHUB_REPOS`/`GITLAB_PROJECTS` 같은 관리자 고정 목록에 없는 저장소/프로젝트라도, 계정만 연결하면
+그 사람이 접근 가능한 전체가 자동으로 검색 대상에 들어갑니다. 재연결("다시 연결" 버튼)해도 안전하게
+재동기화됩니다(같은 id는 덮어쓰고 중복 적재되지 않음). Google Drive만 예외입니다 — 지금 요청하는
+OAuth 스코프(읽기 전용 메타데이터)로는 파일 내용을 못 읽어서 자동 수집은 아직 안 되고, 권한 필터링만
+적용됩니다(파일은 서비스 계정에 개별 공유해야 색인됨).
+
 - **Google Drive**: 로그인 화면 하단 "Google Drive 연결" — access token은 브라우저 세션에만 보관되고
   수명이 짧아(약 1시간) 세션이 바뀌면 다시 연결해야 할 수 있습니다.
 - **GitHub / GitLab**: "GitHub 연결" / "GitLab 연결" — 둘 다 표준 OAuth Authorization Code 플로우라
   별도로 `GITHUB_OAUTH_CLIENT_ID`/`SECRET`, `GITLAB_OAUTH_CLIENT_ID`/`SECRET`이 `.env`에 필요합니다
   (아래 커넥터용 `GITHUB_TOKEN`/`GITLAB_TOKEN`과는 다른 앱). access token은 서버에 저장되어 한 번
-  연결하면 계속 유지됩니다.
+  연결하면 계속 유지됩니다. **GitLab OAuth 토큰은 기본적으로 일정 시간 후 만료되는데 아직 refresh
+  token 갱신을 구현하지 않아서, 만료되면 "다시 연결"로 재인증해야 합니다** (알려진 제약사항).
 - **Slack**: "Slack 연결" — 수집용 봇(`SLACK_BOT_TOKEN`)과 같은 Slack 앱에 "User Token Scopes"만
   추가하면 됩니다(새 앱 필요 없음). 연결 시 발급되는 건 봇 토큰이 아니라 그 사람 본인 권한을
   나타내는 사용자 토큰이며, 검색 시 `conversations.history`로 그 채널을 실제로 읽을 수 있는지
-  확인합니다 (공개 채널이라도 멤버가 아니면 제외).
+  확인합니다 (공개 채널이라도 멤버가 아니면 제외). 자동 수집도 이 사용자 토큰으로 하므로, 봇을
+  채널에 `/invite`하지 않아도 그 사람이 속한 채널은 전부 수집됩니다.
 - **Notion**: "Notion 연결" — 수집용 `NOTION_TOKEN`(Internal Integration)과는 별개로 **OAuth 타입
   통합**을 새로 만들어야 합니다. 동의 화면에서 그 사람이 직접 "이 통합에 공유할 페이지"를 고르고,
   그렇게 고른 페이지에만 접근 가능한 토큰을 받습니다 — 그래서 수집용 통합으로 이미 공유해둔
-  페이지라도 이 OAuth 연결에서 다시 선택하지 않으면 검색에 노출되지 않습니다.
+  페이지라도 이 OAuth 연결에서 다시 선택하지 않으면 검색에 노출되지 않습니다. 자동 수집도 이
+  토큰으로 하므로, 동의 화면에서 고른 페이지 전체가 그대로 검색 대상이 됩니다.
 
 (PRD.md Phase 6 참고)
 
@@ -187,9 +199,12 @@ python rag_pipeline.py --source gitlab
 
 ## 알려진 운영 이슈
 
-- Chroma는 다른 프로세스가 쓴 내용을 자동으로 다시 읽지 않으므로, 적재 스크립트 실행 후 API 서버를 재시작해야 합니다.
+- Chroma는 다른 프로세스가 쓴 내용을 자동으로 다시 읽지 않으므로, **오프라인 CLI 수집**(`python rag_pipeline.py --source X`) 후에는 API 서버를 재시작해야 합니다. 단, `POST /api/v1/sync/{provider}`는 API 서버와 같은 프로세스에서 바로 실행되므로 재시작이 필요 없습니다.
 - Windows 콘솔(cp949)은 이모지를 못 그려서, 로그에 이모지를 쓰면 print 자체가 예외를 던질 수 있습니다 (`main.py`/`rag_pipeline.py` 상단에서 UTF-8로 재설정해 처리 중).
 - Google Drive 커넥터는 Google Docs(`application/vnd.google-apps.document`)만 지원합니다. Sheets/Slides/PDF는 범위 밖입니다.
+- 검색은 관련도(`MIN_SEARCH_RELEVANCE`, 기본 0.3) 미만인 결과를 전부 제외합니다 — 색인된 문서 어디에도
+  안 맞는 검색어를 넣으면 억지로 4개를 채우지 않고 정직하게 "결과 없음"을 보여줍니다.
+- GitLab OAuth 계정 연결 토큰은 refresh token 갱신 로직이 아직 없어서, 만료되면 재연결이 필요합니다.
 
 ## 프론트엔드 상세
 

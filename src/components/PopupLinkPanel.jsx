@@ -14,9 +14,34 @@ const TRUSTED_CALLBACK_ORIGINS = [new URL(API_BASE).origin, 'http://127.0.0.1:80
 export default function PopupLinkPanel({ provider, displayName, icon, linkedLogin, onLinked }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [syncing, setSyncing] = useState(false);
+  const [syncCount, setSyncCount] = useState(null);
+
+  // 연동 성공 직후 그 사람의 토큰으로 실제 볼 수 있는 저장소/프로젝트/채널/페이지 전체를
+  // 자동으로 찾아 색인한다 — 관리자가 미리 지정해둔 고정 목록에만 의존하지 않도록.
+  const syncNow = async () => {
+    setSyncing(true);
+    setSyncCount(null);
+    try {
+      const res = await fetch(`${API_BASE}/api/v1/sync/${provider}`, {
+        method: 'POST',
+        headers: getAuthHeader(),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.detail || '동기화에 실패했습니다.');
+      }
+      setSyncCount(data.count);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSyncing(false);
+    }
+  };
 
   const handleClick = async () => {
     setError('');
+    setSyncCount(null);
     setLoading(true);
     try {
       const res = await fetch(`${API_BASE}/api/v1/auth/link/${provider}/start`, {
@@ -57,9 +82,11 @@ export default function PopupLinkPanel({ provider, displayName, icon, linkedLogi
       });
     } catch (err) {
       setError(err.message);
-    } finally {
       setLoading(false);
+      return;
     }
+    setLoading(false);
+    await syncNow();
   };
 
   return (
@@ -70,9 +97,18 @@ export default function PopupLinkPanel({ provider, displayName, icon, linkedLogi
           <span className="google-link__email">@{linkedLogin}</span>
         </div>
       )}
-      <button className="google-link__button" onClick={handleClick} disabled={loading}>
-        {loading ? '연결 중...' : linkedLogin ? `🔄 ${displayName} 다시 연결` : `${icon} ${displayName} 연결`}
+      <button className="google-link__button" onClick={handleClick} disabled={loading || syncing}>
+        {loading
+          ? '연결 중...'
+          : syncing
+          ? '동기화 중...'
+          : linkedLogin
+          ? `🔄 ${displayName} 다시 연결`
+          : `${icon} ${displayName} 연결`}
       </button>
+      {syncCount !== null && !error && (
+        <p className="google-link__hint">✅ 문서 {syncCount}개 동기화 완료</p>
+      )}
       {error && <p className="google-link__error">{error}</p>}
     </div>
   );

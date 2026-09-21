@@ -41,13 +41,17 @@ def _headers() -> dict:
     return {"Authorization": f"Bearer {token}"}
 
 
-def _request(method: str, path: str, **kwargs) -> dict:
+def _request(method: str, path: str, token: Optional[str] = None, **kwargs) -> dict:
     """Slack Web API 요청 공통 래퍼. rate limit(429)이면 Retry-After만큼 기다렸다 재시도.
     Slack은 에러도 200 OK + {"ok": false, "error": "..."} 로 내려주는 경우가 많아 그것도 체크한다.
-    """
+
+    token을 주면 계정 연동 시 저장해둔 사용자 본인 토큰을 쓴다(채널 목록/히스토리 수집용).
+    안 주면 기존처럼 수집용 봇 토큰(SLACK_BOT_TOKEN)을 쓴다 — 예를 들어 작성자 이름 조회
+    (users.info)는 항상 봇 토큰으로 남겨둔다 (새 Slack 스코프를 추가할 필요가 없도록)."""
+    headers = {"Authorization": f"Bearer {token}"} if token else _headers()
     url = f"{SLACK_API_BASE}/{path}"
     for attempt in range(3):
-        resp = requests.request(method, url, headers=_headers(), timeout=30, **kwargs)
+        resp = requests.request(method, url, headers=headers, timeout=30, **kwargs)
         if resp.status_code == 429:
             wait = float(resp.headers.get("Retry-After", "1"))
             time.sleep(wait)
@@ -60,8 +64,9 @@ def _request(method: str, path: str, **kwargs) -> dict:
     raise RuntimeError(f"Slack API 요청 재시도 초과: {path}")
 
 
-def _list_bot_channels() -> list[dict]:
-    """봇이 멤버로 들어가 있는 채널 목록만 반환한다."""
+def _list_member_channels(token: Optional[str] = None) -> list[dict]:
+    """token 소유자가 멤버로 들어가 있는 채널 목록만 반환한다 — 봇 토큰이면 "봇이 초대된 채널",
+    사용자 본인 토큰이면 "그 사람이 실제로 속한 채널"이 된다."""
     channels = []
     cursor: Optional[str] = None
     while True:
@@ -72,7 +77,7 @@ def _list_bot_channels() -> list[dict]:
         }
         if cursor:
             params["cursor"] = cursor
-        data = _request("GET", "conversations.list", params=params)
+        data = _request("GET", "conversations.list", token=token, params=params)
         for ch in data.get("channels", []):
             if ch.get("is_member"):
                 channels.append(ch)
@@ -97,7 +102,7 @@ def _resolve_user_name(user_id: Optional[str]) -> str:
     return name
 
 
-def _fetch_channel_history(channel_id: str, oldest_ts: str) -> list[dict]:
+def _fetch_channel_history(channel_id: str, oldest_ts: str, token: Optional[str] = None) -> list[dict]:
     """일반 메시지(subtype 없는 것)만, 시간순으로 반환한다."""
     messages = []
     cursor: Optional[str] = None
@@ -105,7 +110,7 @@ def _fetch_channel_history(channel_id: str, oldest_ts: str) -> list[dict]:
         params = {"channel": channel_id, "oldest": oldest_ts, "limit": 200}
         if cursor:
             params["cursor"] = cursor
-        data = _request("GET", "conversations.history", params=params)
+        data = _request("GET", "conversations.history", token=token, params=params)
         for msg in data.get("messages", []):
             if msg.get("subtype"):  # bot_message, channel_join 등 시스템 메시지 제외
                 continue
@@ -116,14 +121,14 @@ def _fetch_channel_history(channel_id: str, oldest_ts: str) -> list[dict]:
     return sorted(messages, key=lambda m: float(m["ts"]))
 
 
-def _fetch_thread_replies(channel_id: str, thread_ts: str) -> list[dict]:
+def _fetch_thread_replies(channel_id: str, thread_ts: str, token: Optional[str] = None) -> list[dict]:
     replies = []
     cursor: Optional[str] = None
     while True:
         params = {"channel": channel_id, "ts": thread_ts, "limit": 200}
         if cursor:
             params["cursor"] = cursor
-        data = _request("GET", "conversations.replies", params=params)
+        data = _request("GET", "conversations.replies", token=token, params=params)
         replies.extend(data.get("messages", []))
         cursor = data.get("response_metadata", {}).get("next_cursor")
         if not cursor:
@@ -139,15 +144,17 @@ def _format_message_line(msg: dict) -> str:
     return f"**{author}** ({ts.strftime('%H:%M')}): {text}"
 
 
-def _get_permalink(channel_id: str, ts: str) -> str:
+def _get_permalink(channel_id: str, ts: str, token: Optional[str] = None) -> str:
     try:
-        data = _request("GET", "chat.getPermalink", params={"channel": channel_id, "message_ts": ts})
+        data = _request(
+            "GET", "chat.getPermalink", token=token, params={"channel": channel_id, "message_ts": ts}
+        )
         return data.get("permalink", "")
     except (requests.HTTPError, RuntimeError):
         return ""
 
 
-def _bundle_to_document(channel: dict, messages: list[dict]) -> Optional[dict]:
+def _bundle_to_document(channel: dict, messages: list[dict], token: Optional[str] = None) -> Optional[dict]:
     if not messages:
         return None
     root = messages[0]
@@ -171,11 +178,11 @@ def _bundle_to_document(channel: dict, messages: list[dict]) -> Optional[dict]:
         "tags": ["slack", channel["name"]],
         "freshness": "fresh",
         "relevance": 1.0,
-        "sourceUrl": _get_permalink(channel["id"], root_ts),
+        "sourceUrl": _get_permalink(channel["id"], root_ts, token=token),
     }
 
 
-def _bundle_channel_messages(channel: dict, messages: list[dict]) -> list[dict]:
+def _bundle_channel_messages(channel: dict, messages: list[dict], token: Optional[str] = None) -> list[dict]:
     """스레드는 통째로 한 문서, 스레드 없는 메시지는 같은 날짜끼리 한 문서로 묶는다."""
     documents = []
     consumed_ts = set()
@@ -185,11 +192,11 @@ def _bundle_channel_messages(channel: dict, messages: list[dict]) -> list[dict]:
         if msg["ts"] in consumed_ts:
             continue
         if msg.get("reply_count", 0) > 0 and msg.get("thread_ts") == msg["ts"]:
-            replies = _fetch_thread_replies(channel["id"], msg["ts"])
+            replies = _fetch_thread_replies(channel["id"], msg["ts"], token=token)
             bundle = [msg] + replies
             for m in bundle:
                 consumed_ts.add(m["ts"])
-            doc = _bundle_to_document(channel, bundle)
+            doc = _bundle_to_document(channel, bundle, token=token)
             if doc:
                 documents.append(doc)
 
@@ -202,23 +209,35 @@ def _bundle_channel_messages(channel: dict, messages: list[dict]) -> list[dict]:
         remaining_by_date[date].append(msg)
 
     for date_msgs in remaining_by_date.values():
-        doc = _bundle_to_document(channel, date_msgs)
+        doc = _bundle_to_document(channel, date_msgs, token=token)
         if doc:
             documents.append(doc)
 
     return documents
 
 
-def fetch_slack_documents() -> list[dict]:
-    """봇이 속한 모든 채널의 최근 대화를 Topic Thread AI 공통 문서 포맷으로 변환해 반환한다."""
+def _fetch_documents_for_channels(channels: list[dict], token: Optional[str] = None) -> list[dict]:
     oldest_dt = datetime.now(tz=timezone.utc) - timedelta(days=SLACK_LOOKBACK_DAYS)
     oldest_ts = str(oldest_dt.timestamp())
 
     documents = []
-    for channel in _list_bot_channels():
-        messages = _fetch_channel_history(channel["id"], oldest_ts)
-        documents.extend(_bundle_channel_messages(channel, messages))
+    for channel in channels:
+        messages = _fetch_channel_history(channel["id"], oldest_ts, token=token)
+        documents.extend(_bundle_channel_messages(channel, messages, token=token))
     return documents
+
+
+def fetch_slack_documents() -> list[dict]:
+    """봇이 속한 모든 채널의 최근 대화를 Topic Thread AI 공통 문서 포맷으로 변환해 반환한다
+    (관리자가 초대해둔 채널 전체 — .env의 SLACK_BOT_TOKEN을 쓴다)."""
+    return _fetch_documents_for_channels(_list_member_channels())
+
+
+def fetch_slack_documents_for_token(user_token: str) -> list[dict]:
+    """계정 연동 시 저장해둔 사용자 본인 토큰으로, 그 사람이 실제로 속한 채널 전체를 자동으로
+    찾아 대화를 수집한다 — 봇을 채널에 따로 /invite 할 필요가 없다."""
+    channels = _list_member_channels(token=user_token)
+    return _fetch_documents_for_channels(channels, token=user_token)
 
 
 if __name__ == "__main__":

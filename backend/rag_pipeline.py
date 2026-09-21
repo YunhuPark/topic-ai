@@ -72,8 +72,15 @@ def ingest_documents(source_docs: list[dict]):
 
         docs.append(Document(page_content=page_content, metadata=metadata))
 
+    ids = [doc["id"] for doc in source_docs]
     vectorstore = get_vectorstore()
-    vectorstore.add_documents(docs)
+    # add_documents에 ids를 안 넘기면 매번 랜덤 id로 새로 쌓이기만 해서 재적재할 때마다 중복이
+    # 누적된다 — 같은 id를 미리 지운 뒤 넣어서 upsert처럼 동작하게 한다.
+    try:
+        vectorstore._collection.delete(ids=ids)
+    except Exception:
+        pass  # 컬렉션이 비어있거나 해당 id가 아직 없으면 조용히 무시
+    vectorstore.add_documents(docs, ids=ids)
     print(f"총 {len(docs)}개의 문서가 성공적으로 적재되었습니다.")
 
 
@@ -151,6 +158,9 @@ prompt_template = """
 1. keyPoints: 전체 문서의 핵심 내용을 3-4개의 문장으로 요약한 리스트
 2. decisionTrail: 시간 순서대로 의사결정의 흐름을 나타내는 리스트. (date, decision, source 포함)
 3. actionItems: 문맥상 아직 완료되지 않았거나 진행 중인 할 일 리스트. (id, task, assignee, dueDate, status, source 포함)
+   task는 "~한 영역과 ~을 구분" 같은 문서 요약 명사구가 아니라, 실제로 할 일을 지시하는 간결한
+   명령형 문장으로 쓰세요 (예: "API 응답 속도 테스트하기", "디자인 시안 최종 검토받기"). 15단어를
+   넘지 않게 하고, 누가 봐도 바로 무엇을 해야 하는지 알 수 있어야 합니다.
    status 값은 반드시 "pending", "in-progress", "completed" 셋 중 하나의 영문 문자열이어야 합니다
    (한국어로 쓰지 마세요 — 우리 시스템이 이 값으로 상태를 순환시킵니다).
    decisionTrail과 actionItems의 source 값은 반드시 그 근거가 된 문서의 "문서 출처: " 뒤에 적힌

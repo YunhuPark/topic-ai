@@ -94,6 +94,10 @@ class SearchCountResponse(BaseModel):
 class AuthorizeUrlResponse(BaseModel):
     authorizeUrl: str
 
+class SyncResponse(BaseModel):
+    provider: str
+    count: int
+
 class ActionItemRecord(BaseModel):
     id: int
     query: str

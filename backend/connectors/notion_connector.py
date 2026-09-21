@@ -30,12 +30,15 @@ _TEXT_BLOCK_TYPES = {
 _user_name_cache: dict[str, str] = {}
 
 
-def _headers() -> dict:
-    token = os.getenv("NOTION_TOKEN")
-    if not token or token == "your_notion_token_here":
-        raise RuntimeError(
-            "NOTION_TOKEN이 설정되지 않았습니다. backend/.env 에 Notion Integration 토큰을 입력하세요."
-        )
+def _headers(token: Optional[str] = None) -> dict:
+    """token을 명시하면 그 값을 그대로 쓰고(계정 연동 시 저장해둔 사용자 본인 OAuth 토큰),
+    안 주면 기존처럼 .env의 관리자 통합 토큰(NOTION_TOKEN)을 쓴다 — CLI 수집 경로는 그대로 유지."""
+    if not token:
+        token = os.getenv("NOTION_TOKEN")
+        if not token or token == "your_notion_token_here":
+            raise RuntimeError(
+                "NOTION_TOKEN이 설정되지 않았습니다. backend/.env 에 Notion Integration 토큰을 입력하세요."
+            )
     return {
         "Authorization": f"Bearer {token}",
         "Notion-Version": NOTION_VERSION,
@@ -43,11 +46,11 @@ def _headers() -> dict:
     }
 
 
-def _request(method: str, path: str, **kwargs) -> dict:
+def _request(method: str, path: str, token: Optional[str] = None, **kwargs) -> dict:
     """Notion API 요청 공통 래퍼. 429(rate limit)면 Retry-After만큼 기다렸다 재시도."""
     url = f"{NOTION_API_BASE}{path}"
     for attempt in range(3):
-        resp = requests.request(method, url, headers=_headers(), timeout=30, **kwargs)
+        resp = requests.request(method, url, headers=_headers(token), timeout=30, **kwargs)
         if resp.status_code == 429:
             wait = float(resp.headers.get("Retry-After", "1"))
             time.sleep(wait)
@@ -58,8 +61,10 @@ def _request(method: str, path: str, **kwargs) -> dict:
     return {}
 
 
-def _list_shared_pages() -> list[dict]:
-    """이 통합에 공유된 모든 페이지를 가져온다 (검색어 없이 search하면 공유된 전체 목록)."""
+def _list_shared_pages(token: Optional[str] = None) -> list[dict]:
+    """이 토큰이 접근 가능한 모든 페이지를 가져온다 (검색어 없이 search하면 전체 목록) —
+    관리자 통합 토큰이면 "공유된 전체", 사용자 본인 OAuth 토큰이면 "그 사람이 동의 화면에서
+    고른 전체"가 된다."""
     pages = []
     start_cursor: Optional[str] = None
     while True:
@@ -69,7 +74,7 @@ def _list_shared_pages() -> list[dict]:
         }
         if start_cursor:
             body["start_cursor"] = start_cursor
-        data = _request("POST", "/search", json=body)
+        data = _request("POST", "/search", token=token, json=body)
         pages.extend(data.get("results", []))
         if not data.get("has_more"):
             break
@@ -77,13 +82,13 @@ def _list_shared_pages() -> list[dict]:
     return pages
 
 
-def _resolve_user_name(user_id: Optional[str]) -> str:
+def _resolve_user_name(user_id: Optional[str], token: Optional[str] = None) -> str:
     if not user_id:
         return "알 수 없음"
     if user_id in _user_name_cache:
         return _user_name_cache[user_id]
     try:
-        data = _request("GET", f"/users/{user_id}")
+        data = _request("GET", f"/users/{user_id}", token=token)
         name = data.get("name") or "알 수 없음"
     except requests.HTTPError:
         name = "알 수 없음"
@@ -118,7 +123,7 @@ def _block_to_text(block: dict) -> str:
     return text
 
 
-def _fetch_block_children_text(block_id: str, depth: int = 0, max_depth: int = 6) -> list[str]:
+def _fetch_block_children_text(block_id: str, depth: int = 0, max_depth: int = 6, token: Optional[str] = None) -> list[str]:
     """블록 하위 자식들을 재귀적으로 순회하며 텍스트 라인 목록을 만든다."""
     if depth > max_depth:
         return []
@@ -128,28 +133,27 @@ def _fetch_block_children_text(block_id: str, depth: int = 0, max_depth: int = 6
         params = {"page_size": 100}
         if start_cursor:
             params["start_cursor"] = start_cursor
-        data = _request("GET", f"/blocks/{block_id}/children", params=params)
+        data = _request("GET", f"/blocks/{block_id}/children", token=token, params=params)
         for block in data.get("results", []):
             text = _block_to_text(block)
             if text:
                 lines.append(text)
             if block.get("has_children"):
-                lines.extend(_fetch_block_children_text(block["id"], depth + 1, max_depth))
+                lines.extend(_fetch_block_children_text(block["id"], depth + 1, max_depth, token=token))
         if not data.get("has_more"):
             break
         start_cursor = data.get("next_cursor")
     return lines
 
 
-def fetch_notion_documents() -> list[dict]:
-    """공유된 모든 Notion 페이지를 Topic Thread AI 공통 문서 포맷으로 변환해 반환한다."""
+def _fetch_documents_for_pages(pages: list[dict], token: Optional[str] = None) -> list[dict]:
     documents = []
-    for page in _list_shared_pages():
+    for page in pages:
         page_id = page["id"]
         title = _extract_page_title(page)
-        author = _resolve_user_name((page.get("created_by") or {}).get("id"))
+        author = _resolve_user_name((page.get("created_by") or {}).get("id"), token=token)
         date = (page.get("created_time") or "")[:10]
-        content_lines = _fetch_block_children_text(page_id)
+        content_lines = _fetch_block_children_text(page_id, token=token)
         content = "\n".join(content_lines) if content_lines else "(본문 없음)"
 
         documents.append({
@@ -166,6 +170,19 @@ def fetch_notion_documents() -> list[dict]:
             "sourceUrl": page.get("url", ""),
         })
     return documents
+
+
+def fetch_notion_documents() -> list[dict]:
+    """공유된 모든 Notion 페이지를 Topic Thread AI 공통 문서 포맷으로 변환해 반환한다
+    (관리자 통합에 공유된 전체 — .env의 NOTION_TOKEN을 쓴다)."""
+    return _fetch_documents_for_pages(_list_shared_pages())
+
+
+def fetch_notion_documents_for_token(token: str) -> list[dict]:
+    """계정 연동 시 저장해둔 사용자 본인 OAuth 토큰으로, 그 사람이 동의 화면에서 고른 페이지
+    전체를 자동으로 찾아 수집한다."""
+    pages = _list_shared_pages(token=token)
+    return _fetch_documents_for_pages(pages, token=token)
 
 
 if __name__ == "__main__":
