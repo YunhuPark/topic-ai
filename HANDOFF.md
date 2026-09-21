@@ -174,6 +174,18 @@ allowed / denied / auth_failed(토큰 만료→재연결 안내) / unavailable(�
 
 1. **`uvicorn --reload`가 가끔 워커를 갱신하지 않는다.** 새 라우트가 404/405로 나오면 리로드를
    믿지 말고 프로세스를 완전히 죽였다 다시 띄운다. 포트 점유 확인: `netstat -ano | findstr :8000`
+   **(2026-09-21 진짜 원인 특정함 — "재부팅해야 하는 좀비 포트"의 정체)** Windows에서
+   `uvicorn --reload`는 감독 프로세스(reloader) + `multiprocessing.spawn`으로 뜨는 별도 자식
+   워커 프로세스로 나뉜다. `netstat -ano`가 보여주는 PID(예: 6860)는 보통 감독 프로세스인데,
+   `taskkill /F`로 그것만 죽이면 **실제로 포트를 물고 요청을 처리하던 자식 프로세스는 안 죽고
+   계속 산다** — `netstat`은 여전히 죽은 감독 프로세스의 PID를 보여줘서 `Get-Process`/
+   `Stop-Process`로는 그 PID를 못 찾으니(이미 죽었으니까) 마치 "귀신 프로세스가 포트를 영원히
+   붙잡고 있다"처럼 보이고, 예전엔 이걸 "소프트웨어로는 못 고치고 재부팅해야 한다"고 결론
+   냈었다. **진짜 해법**: `Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like
+   "*multiprocessing-fork*" }`로 `ParentProcessId`가 죽은 감독 PID와 일치하는 자식을 찾아서
+   그 자식을 `taskkill /F`하면 재부팅 없이 바로 풀린다. 애초에 이 상황을 안 만들려면
+   `--reload` 프로세스를 끌 때 감독만 죽이지 말고, 먼저 `netstat -ano | findstr :8000`으로 PID를
+   확인한 뒤 그 PID의 자식까지 같이 확인해서 정리할 것.
 2. **Windows Smart App Control이 서명 없는 네이티브 모듈을 차단한다.** 실제로 `tiktoken`이
    막혀 백엔드가 기동조차 못 했다. 그래서 `langchain_openai`를 걷어내고 `openai` SDK를 직접
    호출하도록 바꿨다(`rag_pipeline.OpenAIDirectEmbeddings`). **requirements에 tiktoken/
@@ -194,6 +206,11 @@ allowed / denied / auth_failed(토큰 만료→재연결 안내) / unavailable(�
    존재하고 올바른 id의 짝이 없다(그 페이지가 아직 새 방식으로 재동기화된 적이 없어서) —
    지금은 진짜 유일한 사본이라 그대로 뒀지만, 그 페이지가 나중에 다시 동기화되면 같은 패턴의
    중복이 또 생길 수 있으니 그때 같은 방식으로 정리할 것.
+   **위 정리를 할 때 서버를 꼭 내려두고 할 것** — 2026-09-21에 서버를 켠 채로 별도 프로세스에서
+   Chroma를 직접 `delete()`했더니, 서버가 메모리에 들고 있던 인덱스와 디스크 상태가 어긋나서
+   검색이 500 에러를 내기 시작했다(재시작으로 해결됨, 위 1번 항목의 자식 프로세스 문제와 겹쳐서
+   원인 파악이 오래 걸렸다). Chroma persistent client는 여러 프로세스의 동시 쓰기를 안전하게
+   지원하지 않는다.
 6. **Slack OAuth는 `localhost`를 거부한다** → `127.0.0.1` 사용. postMessage origin도 둘 다
    허용해야 한다(`FRONTEND_ORIGINS`).
 7. **관련도 임계값(`MIN_SEARCH_RELEVANCE`)은 고정 숫자로 완벽히 못 가른다.** 실측
