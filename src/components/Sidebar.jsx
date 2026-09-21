@@ -1,16 +1,15 @@
 import { useState } from 'react';
 import './Sidebar.css';
-import GoogleLinkPanel from './GoogleLinkPanel';
 import PopupLinkPanel from './PopupLinkPanel';
 
 const navItems = [
   { id: 'home', icon: '🏠', label: '홈' },
   { id: 'search', icon: '🔍', label: '검색' },
-  { id: 'actions', icon: '⚡', label: '액션 아이템' },
+  { id: 'actions', icon: '⚡', label: '할 일 리스트' },
 ];
 
 export default function Sidebar({
-  activeView, onViewChange, user, onLogout,
+  activeView, onViewChange, user, onLogout, onUnlinked,
   googleLinkedEmail, onGoogleLinked,
   githubLinkedLogin, onGithubLinked,
   gitlabLinkedLogin, onGitlabLinked,
@@ -95,22 +94,25 @@ export default function Sidebar({
           </button>
           {accountsExpanded && (
             <div className="sidebar__accounts-list">
-              <GoogleLinkPanel linkedEmail={googleLinkedEmail} onLinked={onGoogleLinked} />
+              <PopupLinkPanel
+                provider="google" displayName="Google Drive" icon="📁"
+                linkedLogin={googleLinkedEmail} onLinked={onGoogleLinked} onUnlinked={onUnlinked}
+              />
               <PopupLinkPanel
                 provider="github" displayName="GitHub" icon="🐙"
-                linkedLogin={githubLinkedLogin} onLinked={onGithubLinked}
+                linkedLogin={githubLinkedLogin} onLinked={onGithubLinked} onUnlinked={onUnlinked}
               />
               <PopupLinkPanel
                 provider="gitlab" displayName="GitLab" icon="🦊"
-                linkedLogin={gitlabLinkedLogin} onLinked={onGitlabLinked}
+                linkedLogin={gitlabLinkedLogin} onLinked={onGitlabLinked} onUnlinked={onUnlinked}
               />
               <PopupLinkPanel
                 provider="slack" displayName="Slack" icon="💬"
-                linkedLogin={slackLinkedLogin} onLinked={onSlackLinked}
+                linkedLogin={slackLinkedLogin} onLinked={onSlackLinked} onUnlinked={onUnlinked}
               />
               <PopupLinkPanel
                 provider="notion" displayName="Notion" icon="📓"
-                linkedLogin={notionLinkedLogin} onLinked={onNotionLinked}
+                linkedLogin={notionLinkedLogin} onLinked={onNotionLinked} onUnlinked={onUnlinked}
               />
             </div>
           )}

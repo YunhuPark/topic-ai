@@ -6,8 +6,15 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
+import asyncio
+import html
 import json
+import os
+import re
+import threading
+import time
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 
 import requests as http_requests
@@ -18,10 +25,9 @@ from typing import Optional
 from models import (
     SearchResponse, StatsResponse,
     SignupRequest, LoginRequest, AuthResponse, MeResponse,
-    LinkGoogleRequest, LinkedAccount, SearchHistoryItem, ActionItemRecord, SearchCountResponse,
+    LinkedAccount, SearchHistoryItem, ActionItemRecord, SearchCountResponse,
     AuthorizeUrlResponse,
 )
-from dummy_data import mock_documents, mock_summary
 import rag_pipeline
 import db
 import auth
@@ -33,6 +39,102 @@ app = FastAPI(
     description="사내 통합 검색 어시스턴트 API",
     version="0.1.0"
 )
+
+
+SEARCH_CANDIDATE_POOL = 20  # 하이브리드 재정렬을 위해 벡터 유사도만으로 넉넉히 뽑아둘 후보 수
+SEARCH_MAX_RESULTS = 4
+
+# 같은 로컬 서버라도 브라우저는 localhost와 127.0.0.1을 다른 origin으로 본다. 하나만 지정해두면
+# 사용자가 다른 쪽 주소로 접속했을 때 OAuth 연결에 성공하고도 프론트가 postMessage를 못 받아
+# "연결 창이 닫혔습니다" 오류로 보인다 — 그래서 알려진 프론트 origin 전부를 허용/발송 대상으로 쓴다.
+FRONTEND_ORIGINS = [
+    o.strip() for o in os.getenv(
+        "FRONTEND_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173"
+    ).split(",") if o.strip()
+]
+
+# 계정 연동 시점 자동 수집(FR-15)만으로는 그 이후 원본에 새로 쌓인 대화/문서가 반영 안 되므로,
+# 서버에 (access 또는 refresh) 토큰을 저장해두는 5개 소스 전부를 주기적으로 백그라운드에서
+# 다시 수집한다. Google도 refresh_token 방식으로 전환하면서 이 폴링에 들어왔다.
+AUTO_RESYNC_PROVIDERS = ["google", "github", "gitlab", "slack", "notion"]
+AUTO_RESYNC_INTERVAL_SECONDS = int(os.getenv("AUTO_RESYNC_INTERVAL_SECONDS", "900"))
+
+
+async def _auto_resync_loop():
+    while True:
+        await asyncio.sleep(AUTO_RESYNC_INTERVAL_SECONDS)
+        accounts = db.get_all_accounts_with_tokens(AUTO_RESYNC_PROVIDERS)
+        for acc in accounts:
+            user_id, provider = acc["user_id"], acc["provider"]
+            try:
+                stored_token = acc["access_token"]
+                # google은 linked_accounts에 refresh_token을 저장해두므로, 실제 수집에 쓸
+                # 짧은 수명 access_token을 그때그때 새로 발급받아야 한다 (블로킹 HTTP 호출이라
+                # 이벤트 루프를 막지 않도록 스레드로 돌린다).
+                if provider == "google":
+                    stored_token = await asyncio.to_thread(auth.refresh_google_access_token, stored_token)
+                try:
+                    count = await asyncio.to_thread(
+                        rag_pipeline.sync_documents_for_user, provider, stored_token, user_id
+                    )
+                except Exception as e:
+                    # 토큰 만료(401)면 refresh_token으로 한 번 갱신해서 재시도한다 —
+                    # GitLab access token은 기본 2시간이면 만료되므로 이게 없으면 연동이 곧 죽는다.
+                    if "401" not in str(e):
+                        raise
+                    refreshed = await asyncio.to_thread(
+                        auth.refresh_provider_access_token, user_id, provider
+                    )
+                    if not refreshed:
+                        raise
+                    print(f"[자동 재동기화] user_id={user_id} provider={provider} 토큰 갱신 후 재시도")
+                    count = await asyncio.to_thread(
+                        rag_pipeline.sync_documents_for_user, provider, refreshed, user_id
+                    )
+                print(f"[자동 재동기화] user_id={user_id} provider={provider} 새 임베딩 {count}개")
+            except Exception as e:
+                print(f"[자동 재동기화 실패] user_id={user_id} provider={provider}: {e}")
+
+
+@app.on_event("startup")
+async def _start_auto_resync():
+    asyncio.create_task(_auto_resync_loop())
+
+
+def _extract_source_name(source: str, tags_str: str) -> str:
+    """github/gitlab/slack는 tags[1]에 저장소·프로젝트·채널 이름이 들어있다(각 커넥터가 만드는
+    tags 순서 ["github", "owner/repo", kind] 등에 의존). notion/gdrive는 tags[1]이 "sheet"/"pdf"
+    같은 파일 종류일 뿐 이름이 아니라서 여기 포함하지 않는다."""
+    if source not in ("github", "gitlab", "slack"):
+        return ""
+    parts = (tags_str or "").split(",")
+    return parts[1] if len(parts) > 1 else ""
+
+
+def _keyword_boost(query: str, title: str, content: str, source_name: str = "") -> float:
+    """벡터 유사도만으로는 "paper"처럼 짧고 뜻이 여러 개인 질의어가 제목에 그 단어가
+    그대로 들어간 문서보다 의미상 막연히 가까운 다른 문서를 앞세우는 경우가 있어서
+    (실제 검증: 19개 문서 중 제목이 "paper_draft"인 문서가 13위로 밀림), 제목/본문/출처 이름에
+    질의어가 그대로 등장하면 가산점을 주는 가벼운 키워드 보정. 0~1 범위.
+
+    출처 이름(저장소/프로젝트/채널명) 일치가 가장 강한 신호로 취급된다 — 실제 검증: "medi" 검색 시
+    "Medi-Matrix" 저장소 자체의 PR보다, 그 저장소를 본문에서 언급만 한 다른 저장소("portfolio")의
+    문서가 앞서는 문제를 발견함. 특정 프로젝트를 가리키는 것이 명백한 짧은 질의어는 그 프로젝트
+    "자체"의 문서를 최우선해야 자연스럽다."""
+    tokens = [t for t in re.findall(r"[\w가-힣]+", query.lower()) if len(t) >= 2]
+    if not tokens:
+        return 0.0
+    title_l, content_l, source_l = title.lower(), content.lower(), source_name.lower()
+    weight_per_token = 3.0 if source_l else 2.0
+    score = 0.0
+    for t in tokens:
+        if source_l and t in source_l:
+            score += 3.0
+        elif t in title_l:
+            score += 2.0  # 제목 일치가 본문 일치보다 훨씬 강한 신호
+        elif t in content_l:
+            score += 1.0
+    return score / (len(tokens) * weight_per_token)
 
 
 def compute_freshness(date_str: str) -> str:
@@ -48,10 +150,10 @@ def compute_freshness(date_str: str) -> str:
         return "moderate"
     return "stale"
 
-# CORS 설정 (프론트엔드 통신 허용)
+# CORS 설정 (프론트엔드 통신 허용) — OAuth 콜백의 postMessage 대상과 같은 목록을 쓴다
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=FRONTEND_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -88,17 +190,41 @@ def auth_me(authorization: Optional[str] = Header(None)):
     return MeResponse(**user)
 
 
-@app.post("/api/v1/auth/link/google", response_model=LinkedAccount)
-def link_google(payload: LinkGoogleRequest, authorization: Optional[str] = Header(None)):
+@app.get("/api/v1/auth/link/google/start", response_model=AuthorizeUrlResponse)
+def link_google_start(authorization: Optional[str] = Header(None)):
+    """Google도 이제 GitHub/GitLab과 같은 팝업+콜백 패턴이라, 이 구체적인 경로를 아래의
+    `/link/{provider}/start`보다 먼저 등록해 "google"이 그쪽으로 새지 않게 한다."""
     user = auth.get_current_user(authorization)
     if not user:
         raise HTTPException(status_code=401, detail="로그인이 필요합니다.")
     try:
-        auth.link_google_account(user["id"], payload.accessToken)
+        url = auth.get_google_authorize_url(user["id"])
     except auth.AuthError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    linked = db.get_linked_accounts(user["id"])
-    return next(a for a in linked if a["provider"] == "google")
+    return AuthorizeUrlResponse(authorizeUrl=url)
+
+
+@app.get("/api/v1/auth/link/google/callback", response_class=HTMLResponse)
+def link_google_callback(code: str = "", state: str = ""):
+    result = auth.complete_google_link(code, state)
+    return _oauth_callback_html("google", result)
+
+
+@app.delete("/api/v1/auth/link/{provider}", response_model=list[LinkedAccount])
+def unlink_account(provider: str, authorization: Optional[str] = Header(None)):
+    """연동을 해제하고, 그 사용자가 이 소스로 가져왔던 문서도 함께 정리한다."""
+    user = _require_user(authorization)
+    if provider not in rag_pipeline.PROVIDER_SOURCES:
+        raise HTTPException(status_code=404, detail="지원하지 않는 연동입니다.")
+    if not db.unlink_account(user["id"], provider):
+        raise HTTPException(status_code=404, detail="연결된 계정이 없습니다.")
+    try:
+        removed = rag_pipeline.remove_user_documents(provider, user["id"])
+        print(f"[연동 해제] user_id={user['id']} provider={provider} 문서 {removed}개 정리")
+    except Exception as e:
+        # 문서 정리가 실패해도 연동 해제 자체는 이미 끝났다 (다음 정리 때 걸린다)
+        print(f"[연동 해제] 문서 정리 실패 user_id={user['id']} provider={provider}: {e}")
+    return db.get_linked_accounts(user["id"])
 
 
 @app.get("/api/v1/auth/linked", response_model=list[LinkedAccount])
@@ -109,19 +235,25 @@ def get_linked(authorization: Optional[str] = Header(None)):
     return db.get_linked_accounts(user["id"])
 
 
-FRONTEND_ORIGIN = "http://localhost:5173"
-
-
 def _oauth_callback_html(provider: str, result: dict) -> str:
     payload = {"provider": provider, **result}
-    message_json = json.dumps(payload)
+    # </script>가 섞인 값(제공자가 내려준 오류 문구, 표시 이름 등)이 스크립트 태그를 깨고 나오지
+    # 않도록 이스케이프한다. 화면에 그대로 찍는 오류 문구도 HTML 이스케이프.
+    message_json = json.dumps(payload).replace("<", "\\u003c").replace(">", "\\u003e")
+    if result.get("ok"):
+        message = html.escape(f"{provider} 연결 완료! 이 창은 자동으로 닫힙니다...")
+    else:
+        message = "연결에 실패했습니다: " + html.escape(result.get("error", ""))
+    origins_json = json.dumps(FRONTEND_ORIGINS)
     return f"""
     <html><body style="background:#0a0b0f;color:#fff;font-family:sans-serif;
     display:flex;align-items:center;justify-content:center;height:100vh;margin:0;">
-      <p>{f'{provider} 연결 완료! 이 창은 자동으로 닫힙니다...' if result.get('ok') else '연결에 실패했습니다: ' + result.get('error', '')}</p>
+      <p>{message}</p>
       <script>
         if (window.opener) {{
-          window.opener.postMessage({message_json}, "{FRONTEND_ORIGIN}");
+          for (const origin of {origins_json}) {{
+            window.opener.postMessage({message_json}, origin);
+          }}
         }}
         setTimeout(() => window.close(), 1200);
       </script>
@@ -226,21 +358,42 @@ def toggle_action_item(item_id: int, authorization: Optional[str] = Header(None)
     user = _require_user(authorization)
     result = db.toggle_action_item_status(user["id"], item_id)
     if not result:
-        raise HTTPException(status_code=404, detail="액션 아이템을 찾을 수 없습니다.")
+        raise HTTPException(status_code=404, detail="할 일을 찾을 수 없습니다.")
     return db.get_action_items(user["id"])
 
+
+@app.delete("/api/v1/action-items/{item_id}", response_model=list[ActionItemRecord])
+def delete_action_item(item_id: int, authorization: Optional[str] = Header(None)):
+    user = _require_user(authorization)
+    if not db.delete_action_item(user["id"], item_id):
+        raise HTTPException(status_code=404, detail="할 일을 찾을 수 없습니다.")
+    return db.get_action_items(user["id"])
+
+STATS_MAX_TOPICS = 50  # 문서가 수천 개로 늘어도 대시보드 응답이 무거워지지 않도록 상한
+
+
 @app.get("/api/v1/stats", response_model=StatsResponse)
-def get_stats():
-    """대시보드용 통계: 인덱싱된 문서 수, 연동 소스 수, 신선도 분포, 문서(토픽) 목록."""
+def get_stats(authorization: Optional[str] = Header(None)):
+    """대시보드용 통계: 인덱싱된 문서 수, 연동 소스 수, 신선도 분포, 문서(토픽) 목록.
+
+    **본인이 연동해서 가져온 문서(syncedBy에 내 user_id가 있는 것)만** 집계한다 — 모든 사용자가
+    Chroma 컬렉션 하나를 공유하기 때문에, 이 제한이 없으면 남의 비공개 Slack 대화·개인 Drive 파일
+    제목이 그대로 보인다(검색은 요청마다 권한을 확인하는데 통계만 그 전제를 비켜가던 문제)."""
+    user = _require_user(authorization)
     vectorstore = rag_pipeline.get_vectorstore()
     data = vectorstore._collection.get(include=["metadatas"])
     metadatas = data.get("metadatas", [])
 
+    marker = f",{user['id']},"
     source_counts: dict[str, int] = {}
     freshness_counts = {"fresh": 0, "moderate": 0, "stale": 0}
     topics = []
+    total = 0
 
     for m in metadatas:
+        if not m or marker not in (m.get("syncedBy") or ""):
+            continue
+        total += 1
         source = m.get("source", "unknown")
         source_counts[source] = source_counts.get(source, 0) + 1
 
@@ -258,15 +411,43 @@ def get_stats():
     topics.sort(key=lambda t: t["date"], reverse=True)
 
     return StatsResponse(
-        totalDocuments=len(metadatas),
+        totalDocuments=total,
         connectedSources=len(source_counts),
         sources=[{"source": s, "count": c} for s, c in source_counts.items()],
         freshness=freshness_counts,
-        topics=topics,
+        topics=topics[:STATS_MAX_TOPICS],
     )
 
 
-def _check_gdrive_access(file_id: str, google_access_token: str) -> bool:
+# 권한 확인 결과. 예전엔 전부 bool이라 "권한 없음"과 "토큰이 죽었음"과 "일시적 오류"가 똑같이
+# False로 뭉개져서, 사용자 입장에선 문서가 아무 설명 없이 사라지는 것처럼 보였다.
+ACCESS_ALLOWED = "allowed"
+ACCESS_DENIED = "denied"          # 실제로 접근 권한이 없음 (정상적인 제외)
+ACCESS_AUTH_FAILED = "auth_failed"  # 토큰 만료/취소 → 재연결 필요
+ACCESS_UNAVAILABLE = "unavailable"  # rate limit·서버 오류·타임아웃 등 일시적 실패
+
+# 같은 저장소/채널이 여러 문서에 걸쳐 반복 조회되므로 짧게 캐시한다.
+PERMISSION_CACHE_TTL_SECONDS = 300
+_permission_cache: dict[tuple, tuple[str, float]] = {}
+_permission_cache_lock = threading.Lock()
+
+
+def _classify_response(resp) -> str:
+    if resp.status_code == 200:
+        return ACCESS_ALLOWED
+    if resp.status_code == 401:
+        return ACCESS_AUTH_FAILED
+    if resp.status_code == 403:
+        # GitHub는 rate limit도 403으로 준다 — 남은 한도가 0이면 권한 문제가 아니라 일시적 실패다.
+        if resp.headers.get("X-RateLimit-Remaining") == "0":
+            return ACCESS_UNAVAILABLE
+        return ACCESS_DENIED
+    if resp.status_code == 404:
+        return ACCESS_DENIED
+    return ACCESS_UNAVAILABLE
+
+
+def _check_gdrive_access(file_id: str, google_access_token: str) -> str:
     """이 Google 계정(access token 소유자)이 실제로 이 파일에 접근 가능한지 Drive API로 직접 확인한다.
     서비스 계정으로는 파일의 전체 권한자 목록을 볼 수 없어서(403 insufficientFilePermissions),
     반대로 사용자 본인 토큰으로 파일 하나하나를 열어보는 방식으로 확인한다."""
@@ -277,12 +458,12 @@ def _check_gdrive_access(file_id: str, google_access_token: str) -> bool:
             headers={"Authorization": f"Bearer {google_access_token}"},
             timeout=10,
         )
-        return resp.status_code == 200
+        return _classify_response(resp)
     except http_requests.RequestException:
-        return False
+        return ACCESS_UNAVAILABLE
 
 
-def _check_github_access(repo_full_name: str, github_access_token: str) -> bool:
+def _check_github_access(repo_full_name: str, github_access_token: str) -> str:
     """이 GitHub 계정(access token 소유자)이 실제로 이 저장소에 접근 가능한지 직접 확인한다.
     GitHub는 access token이 오래 유지되므로(Google과 달리) 링크할 때 서버에 저장해두고 여기서 바로 쓴다."""
     try:
@@ -291,12 +472,12 @@ def _check_github_access(repo_full_name: str, github_access_token: str) -> bool:
             headers={"Authorization": f"Bearer {github_access_token}", "Accept": "application/vnd.github+json"},
             timeout=10,
         )
-        return resp.status_code == 200
+        return _classify_response(resp)
     except http_requests.RequestException:
-        return False
+        return ACCESS_UNAVAILABLE
 
 
-def _check_gitlab_access(project_path: str, gitlab_access_token: str) -> bool:
+def _check_gitlab_access(project_path: str, gitlab_access_token: str) -> str:
     """이 GitLab 계정(access token 소유자)이 실제로 이 프로젝트에 접근 가능한지 직접 확인한다.
     GitHub와 동일한 패턴 — access token은 링크할 때 서버에 저장해두고 여기서 바로 쓴다."""
     try:
@@ -306,12 +487,12 @@ def _check_gitlab_access(project_path: str, gitlab_access_token: str) -> bool:
             headers={"Authorization": f"Bearer {gitlab_access_token}"},
             timeout=10,
         )
-        return resp.status_code == 200
+        return _classify_response(resp)
     except http_requests.RequestException:
-        return False
+        return ACCESS_UNAVAILABLE
 
 
-def _check_notion_access(page_id: str, notion_access_token: str) -> bool:
+def _check_notion_access(page_id: str, notion_access_token: str) -> str:
     """이 Notion 계정(사용자 토큰 소유자)이 실제로 이 페이지에 접근 가능한지 직접 확인한다.
     Public Integration은 동의 화면에서 그 사람이 고른 페이지에만 토큰이 접근 가능해서,
     Drive/GitHub/GitLab과 동일하게 본인 토큰으로 건별 GET하는 패턴이 그대로 맞는다."""
@@ -321,12 +502,17 @@ def _check_notion_access(page_id: str, notion_access_token: str) -> bool:
             headers={"Authorization": f"Bearer {notion_access_token}", "Notion-Version": "2022-06-28"},
             timeout=10,
         )
-        return resp.status_code == 200
+        return _classify_response(resp)
     except http_requests.RequestException:
-        return False
+        return ACCESS_UNAVAILABLE
 
 
-def _check_slack_access(channel_id: str, slack_user_token: str) -> bool:
+# Slack은 오류도 200 + {"ok": false, "error": "..."}로 주기 때문에 error 문자열로 구분해야 한다.
+_SLACK_AUTH_ERRORS = {"invalid_auth", "not_authed", "token_revoked", "account_inactive"}
+_SLACK_TRANSIENT_ERRORS = {"ratelimited", "fatal_error", "service_unavailable", "internal_error"}
+
+
+def _check_slack_access(channel_id: str, slack_user_token: str) -> str:
     """이 Slack 계정(사용자 토큰 소유자) 본인이 실제로 이 채널의 메시지를 볼 수 있는지 확인한다.
     공개 채널이라도 멤버가 아니면 conversations.history가 not_in_channel로 실패하므로,
     "채널 존재 여부"가 아니라 "내가 이 토큰으로 이 채널 대화를 읽을 수 있는가"를 그대로 확인하는 셈이다."""
@@ -337,40 +523,148 @@ def _check_slack_access(channel_id: str, slack_user_token: str) -> bool:
             params={"channel": channel_id, "limit": 1},
             timeout=10,
         )
-        return resp.status_code == 200 and resp.json().get("ok", False)
-    except http_requests.RequestException:
-        return False
+        if resp.status_code == 429:
+            return ACCESS_UNAVAILABLE
+        if resp.status_code != 200:
+            return _classify_response(resp)
+        data = resp.json()
+        if data.get("ok"):
+            return ACCESS_ALLOWED
+        error = data.get("error", "")
+        if error in _SLACK_AUTH_ERRORS:
+            return ACCESS_AUTH_FAILED
+        if error in _SLACK_TRANSIENT_ERRORS:
+            return ACCESS_UNAVAILABLE
+        return ACCESS_DENIED  # not_in_channel, channel_not_found 등
+    except (http_requests.RequestException, ValueError):
+        return ACCESS_UNAVAILABLE
+
+
+def _resource_of(source: str, metadata: dict) -> Optional[str]:
+    """문서 메타데이터에서 "권한을 확인할 대상"(저장소/프로젝트/채널/파일/페이지)을 뽑아낸다.
+    여러 문서가 같은 저장소·채널을 공유하므로, 이 단위로 묶어야 확인 횟수를 크게 줄일 수 있다."""
+    doc_id = metadata.get("id", "") or ""
+    tags = (metadata.get("tags", "") or "").split(",")
+
+    if source == "gdrive":
+        return doc_id[len("gdrive-"):] if doc_id.startswith("gdrive-") else None
+    if source in ("github", "gitlab"):
+        # 각 커넥터가 tags를 ["github", "owner/repo", kind] 순서로 만들어두는 것에 의존
+        return tags[1] if len(tags) > 1 and tags[1] else None
+    if source == "slack":
+        # id 형식 "slack-{channelId}-{ts}" — 채널 ID엔 대시가 없고 ts는 점을 쓰므로 첫 "-"로 분리된다
+        remainder = doc_id[len("slack-"):] if doc_id.startswith("slack-") else ""
+        return remainder.split("-")[0] if remainder else None
+    if source == "notion":
+        # id 형식 "notion-{page_id}" — page_id 자체가 대시 포함 UUID라 접두사만 잘라내면 된다
+        return doc_id[len("notion-"):] if doc_id.startswith("notion-") else None
+    return None
+
+
+def _check_access(source: str, resource: str, tokens: dict) -> str:
+    token = tokens.get(source)
+    if not token:
+        return ACCESS_DENIED  # 연동 안 된 소스는 기본 거부
+    if source == "gdrive":
+        return _check_gdrive_access(resource, token)
+    if source == "github":
+        return _check_github_access(resource, token)
+    if source == "gitlab":
+        return _check_gitlab_access(resource, token)
+    if source == "slack":
+        return _check_slack_access(resource, token)
+    if source == "notion":
+        return _check_notion_access(resource, token)
+    return ACCESS_DENIED
+
+
+def _check_access_cached(user_id: int, source: str, resource: str, tokens: dict) -> str:
+    key = (user_id, source, resource)
+    now = time.time()
+    with _permission_cache_lock:
+        cached = _permission_cache.get(key)
+        if cached and cached[1] > now:
+            return cached[0]
+
+    result = _check_access(source, resource, tokens)
+
+    # 일시적 실패는 캐시하지 않는다 — 다음 검색 때 다시 확인해야 복구된 걸 알 수 있다.
+    if result != ACCESS_UNAVAILABLE:
+        with _permission_cache_lock:
+            _permission_cache[key] = (result, now + PERMISSION_CACHE_TTL_SECONDS)
+    return result
+
+
+def _check_all(user_id: int, resources: set[tuple], tokens: dict) -> dict[tuple, str]:
+    if not resources:
+        return {}
+    with ThreadPoolExecutor(max_workers=min(8, len(resources))) as pool:
+        futures = {
+            pool.submit(_check_access_cached, user_id, source, resource, tokens): (source, resource)
+            for source, resource in resources
+        }
+        return {futures[f]: f.result() for f in as_completed(futures)}
+
+
+def _resolve_permissions(user_id: int, resources: set[tuple], tokens: dict) -> dict[tuple, str]:
+    """(source, resource) 쌍들의 권한을 병렬로 확인한다. 예전엔 후보 문서마다 순차로 HTTP를
+    호출해서 최악의 경우 20회 × 10초가 그대로 검색 지연이 됐다.
+
+    토큰 만료로 실패한 소스는 저장된 refresh_token으로 한 번 갱신해서 다시 확인한다 —
+    GitLab access token은 기본 2시간이면 만료되므로 이 재시도가 없으면 연동이 곧 죽는다."""
+    results = _check_all(user_id, resources, tokens)
+
+    expired_sources = {s for (s, _), v in results.items() if v == ACCESS_AUTH_FAILED}
+    retry_resources = set()
+    for source in expired_sources:
+        provider = "google" if source == "gdrive" else source
+        new_token = auth.refresh_provider_access_token(user_id, provider)
+        if not new_token:
+            continue
+        tokens[source] = new_token
+        with _permission_cache_lock:
+            for resource in {r for (s, r) in results if s == source}:
+                _permission_cache.pop((user_id, source, resource), None)
+        retry_resources |= {(s, r) for (s, r) in results if s == source}
+
+    if retry_resources:
+        results.update(_check_all(user_id, retry_resources, tokens))
+    return results
 
 
 @app.get("/api/v1/search", response_model=SearchResponse)
 def search_documents(
     q: str = Query(..., description="검색 쿼리"),
     authorization: Optional[str] = Header(None),
-    x_google_drive_token: Optional[str] = Header(None),
 ):
     """
     주어진 쿼리로 통합 검색을 수행하고 결과와 AI 요약을 반환합니다. 로그인이 필수입니다 —
     검색 기록과 액션아이템이 브라우저가 아니라 계정에 귀속되므로, 누구 계정인지 알아야 합니다.
 
-    권한 인지형 검색:
-    - Google Drive(Phase 6b): 프론트가 함께 보낸 사용자 본인의 Google access token
-      (X-Google-Drive-Token)으로 그 파일을 실제로 열 수 있는지 실시간으로 확인한다.
-    - GitHub/GitLab(Phase 6c/6d): 계정 연결 시 서버에 저장해둔 access token으로 그
+    권한 인지형 검색 (다섯 다 토큰/연결이 없으면 검색 결과에서 제외한다 — 기본 거부):
+    - Google Drive: 서버에 저장해둔 refresh_token으로 그때그때 짧은 수명 access token을 새로
+      발급받아(auth.refresh_google_access_token) 그 파일을 실제로 열 수 있는지 실시간으로 확인한다
+      (예전엔 프론트가 X-Google-Drive-Token 헤더로 매 요청 보내줘야 했지만, GitHub/GitLab처럼
+      서버 저장 방식으로 바뀌면서 더 이상 필요 없다).
+    - GitHub/GitLab: 계정 연결 시 서버에 저장해둔 access token으로 그
       저장소/프로젝트를 실제로 볼 수 있는지 실시간으로 확인한다.
-    - Slack(Phase 6e): 계정 연결 시 저장해둔 사용자 본인 토큰으로 그 채널 대화를
+    - Slack: 계정 연결 시 저장해둔 사용자 본인 토큰으로 그 채널 대화를
       실제로 읽을 수 있는지(conversations.history) 실시간으로 확인한다.
-    - Notion(Phase 6f): Public Integration 동의 화면에서 그 사람이 직접 고른 페이지에만
+    - Notion: Public Integration 동의 화면에서 그 사람이 직접 고른 페이지에만
       토큰이 접근 가능하므로, Drive/GitHub/GitLab과 같은 패턴으로 본인 토큰으로 페이지를
       직접 GET해 확인한다.
-    다섯 다 토큰/연결이 없으면 검색 결과에서 제외한다(기본 거부).
     """
     user = auth.get_current_user(authorization)
     if not user:
         raise HTTPException(status_code=401, detail="로그인이 필요합니다.")
-    github_access_token = db.get_linked_access_token(user["id"], "github")
-    gitlab_access_token = db.get_linked_access_token(user["id"], "gitlab")
-    slack_access_token = db.get_linked_access_token(user["id"], "slack")
-    notion_access_token = db.get_linked_access_token(user["id"], "notion")
+
+    tokens = {
+        "github": db.get_linked_access_token(user["id"], "github"),
+        "gitlab": db.get_linked_access_token(user["id"], "gitlab"),
+        "slack": db.get_linked_access_token(user["id"], "slack"),
+        "notion": db.get_linked_access_token(user["id"], "notion"),
+    }
+    google_refresh_token = db.get_linked_access_token(user["id"], "google")
 
     db.record_search(user["id"], q)
 
@@ -379,57 +673,71 @@ def search_documents(
         vectorstore = rag_pipeline.get_vectorstore()
 
         # 아직 DB가 비어있는지 확인 로직은 생략 (데모용)
-        # 유사도 기반 상위 4개 추출 (점수 포함 — 거리가 작을수록 유사)
-        results = vectorstore.similarity_search_with_score(q, k=4)
+        # 최종 4개보다 넉넉히(20개) 후보를 뽑아서, 순수 벡터 거리 대신 (벡터 유사도 + 제목/본문
+        # 키워드 일치) 하이브리드 점수로 재정렬한 뒤 상위 4개를 고른다 — 벡터 유사도만 쓰면
+        # 검색어가 제목에 그대로 있는 문서도 밀려날 수 있다 (_keyword_boost 참고).
+        results = vectorstore.similarity_search_with_score(q, k=SEARCH_CANDIDATE_POOL)
 
         if not results:
-            # DB가 비어있으면 Fallback
-            return SearchResponse(documents=mock_documents, summary=mock_summary)
+            # 아직 아무 문서도 색인되지 않은 상태 — 예전엔 mock 문서를 돌려줬지만, 사용자가
+            # 진짜 사내 문서와 구분할 방법이 없어서 없앴다.
+            return SearchResponse(documents=[], summary={
+                "title": "아직 검색할 문서가 없습니다",
+                "keyPoints": [
+                    "사이드바의 '연동 관리'에서 Google Drive·GitHub·GitLab·Slack·Notion 중 하나를 연결하면"
+                    " 그 계정에서 접근 가능한 문서를 자동으로 가져옵니다.",
+                ],
+                "decisionTrail": [],
+                "actionItems": [],
+            })
 
-        # 프론트엔드 포맷(List[dict])에 맞게 변환 (권한 없는 gdrive 문서는 여기서 제외)
+        scored_results = []
+        for d, distance in results:
+            # Chroma 기본 거리(0~2 범위)를 0~1 관련도로 정규화
+            relevance = max(0.0, min(1.0, 1 - distance / 2))
+            source_name = _extract_source_name(d.metadata.get("source", ""), d.metadata.get("tags", ""))
+            keyword_score = _keyword_boost(
+                q, d.metadata.get("title", ""), d.metadata.get("content", d.page_content), source_name
+            )
+            combined_score = relevance * 0.65 + keyword_score * 0.35
+            scored_results.append((combined_score, relevance, d))
+        scored_results.sort(key=lambda item: item[0], reverse=True)
+
+        # 후보들이 참조하는 "권한 확인 대상"을 먼저 모아서 중복을 없앤다 — 같은 저장소·채널의
+        # 문서가 여러 개 걸리는 게 보통이라, 이것만으로도 실제 확인 횟수가 크게 준다.
+        needed_resources = set()
+        for _, _, d in scored_results:
+            source = d.metadata.get("source", "notion")
+            resource = _resource_of(source, d.metadata)
+            if resource:
+                needed_resources.add((source, resource))
+
+        # gdrive 문서가 후보에 있을 때만 Google access token을 갱신한다
+        if any(source == "gdrive" for source, _ in needed_resources) and google_refresh_token:
+            try:
+                tokens["gdrive"] = auth.refresh_google_access_token(google_refresh_token)
+            except auth.AuthError:
+                tokens["gdrive"] = None
+
+        permissions = _resolve_permissions(user["id"], needed_resources, tokens)
+        disconnected = sorted({s for (s, _), v in permissions.items() if v == ACCESS_AUTH_FAILED})
+        degraded = sorted({s for (s, _), v in permissions.items() if v == ACCESS_UNAVAILABLE})
+
+        # 프론트엔드 포맷(List[dict])에 맞게 변환 (권한 없는 문서는 여기서 제외)
         formatted_docs = []
         visible_docs = []
-        for d, distance in results:
+        for combined_score, relevance, d in scored_results:
+            if len(formatted_docs) >= SEARCH_MAX_RESULTS:
+                break
             source = d.metadata.get("source", "notion")
-            if source == "gdrive":
-                doc_id = d.metadata.get("id", "")
-                file_id = doc_id[len("gdrive-"):] if doc_id.startswith("gdrive-") else None
-                if not x_google_drive_token or not file_id or not _check_gdrive_access(file_id, x_google_drive_token):
-                    continue
-            if source == "github":
-                # github_connector가 tags를 ["github", "owner/repo", kind] 순서로 만들어두는 것에 의존
-                tags_list = (d.metadata.get("tags", "") or "").split(",")
-                repo_full_name = tags_list[1] if len(tags_list) > 1 else None
-                if not github_access_token or not repo_full_name or not _check_github_access(repo_full_name, github_access_token):
-                    continue
-            if source == "gitlab":
-                # gitlab_connector도 tags를 ["gitlab", "namespace/project", kind] 순서로 만들어둔다
-                tags_list = (d.metadata.get("tags", "") or "").split(",")
-                project_path = tags_list[1] if len(tags_list) > 1 else None
-                if not gitlab_access_token or not project_path or not _check_gitlab_access(project_path, gitlab_access_token):
-                    continue
-            if source == "slack":
-                # slack_connector가 id를 "slack-{channelId}-{ts}" 형태로 만들어두는 것에 의존.
-                # 채널 ID는 대시(-)를 포함하지 않고, 타임스탬프는 점(.)을 쓰므로 첫 "-"로 안전하게 분리된다.
-                doc_id = d.metadata.get("id", "")
-                remainder = doc_id[len("slack-"):] if doc_id.startswith("slack-") else ""
-                channel_id = remainder.split("-")[0] if remainder else None
-                if not slack_access_token or not channel_id or not _check_slack_access(channel_id, slack_access_token):
-                    continue
-            if source == "notion":
-                # notion_connector가 id를 "notion-{page_id}" 형태로 만들어둔다. page_id 자체가
-                # 대시 포함 UUID라, 접두사만 잘라내면 그대로 유효한 page_id가 된다.
-                doc_id = d.metadata.get("id", "")
-                page_id = doc_id[len("notion-"):] if doc_id.startswith("notion-") else None
-                if not notion_access_token or not page_id or not _check_notion_access(page_id, notion_access_token):
-                    continue
+            resource = _resource_of(source, d.metadata)
+            if not resource or permissions.get((source, resource)) != ACCESS_ALLOWED:
+                continue
 
             # metadata.content가 임베딩용 접두사("Title: ...\n\nContent:\n") 없는 원본 본문
             content = d.metadata.get("content", d.page_content)
             doc_date = d.metadata.get("date", "2026-09-01")
             tags_str = d.metadata.get("tags", "")
-            # Chroma 기본 거리(코사인, 0~2 범위)를 0~1 관련도로 정규화
-            relevance = max(0.0, min(1.0, 1 - distance / 2))
             visible_docs.append(d)
             formatted_docs.append({
                 "id": d.metadata.get("id", "unknown"),
@@ -448,26 +756,59 @@ def search_documents(
 
         if not formatted_docs:
             # 검색은 됐지만 권한상 보여줄 문서가 하나도 없는 경우 — mock으로 채우지 않고 빈 결과를 그대로 반환
-            empty_summary = {
-                "title": "표시할 수 있는 결과가 없습니다",
-                "keyPoints": ["검색된 문서가 있었지만, 현재 계정이 접근 권한을 확인할 수 없어 결과에서 제외됐습니다."],
-                "decisionTrail": [],
-                "actionItems": [],
-            }
-            return SearchResponse(documents=[], summary=empty_summary)
+            if disconnected:
+                reason = (
+                    f"{', '.join(disconnected)} 연동이 만료되었거나 해제된 것 같습니다. "
+                    "사이드바에서 다시 연결해 주세요."
+                )
+            elif degraded:
+                reason = f"{', '.join(degraded)} 확인에 일시적으로 실패했습니다. 잠시 후 다시 시도해 주세요."
+            else:
+                reason = "검색된 문서가 있었지만, 현재 계정에 접근 권한이 없어 결과에서 제외됐습니다."
+            return SearchResponse(
+                documents=[],
+                summary={
+                    "title": "표시할 수 있는 결과가 없습니다",
+                    "keyPoints": [reason],
+                    "decisionTrail": [],
+                    "actionItems": [],
+                },
+                disconnectedSources=disconnected,
+                degradedSources=degraded,
+            )
 
         # 2. LLM을 통한 요약 및 액션 아이템 추출
         summary_dict = rag_pipeline.generate_ai_summary(q, visible_docs)
+
+        if summary_dict is None:
+            # 요약만 실패한 경우 — 찾은 문서는 그대로 보여주되, 가짜 요약으로 채우지 않는다.
+            # (할 일 저장도 건너뛴다 — 예전엔 mock 요약의 액션아이템이 진짜처럼 저장됐다.)
+            return SearchResponse(
+                documents=formatted_docs,
+                summary={
+                    "title": "AI 요약을 생성하지 못했습니다",
+                    "keyPoints": ["검색된 문서는 아래에 그대로 표시했습니다. 잠시 후 다시 시도해 주세요."],
+                    "decisionTrail": [],
+                    "actionItems": [],
+                },
+                disconnectedSources=disconnected,
+                degradedSources=degraded,
+            )
 
         if summary_dict.get("actionItems"):
             db.upsert_action_items(user["id"], q, summary_dict["actionItems"])
 
         return SearchResponse(
             documents=formatted_docs,
-            summary=summary_dict
+            summary=summary_dict,
+            disconnectedSources=disconnected,
+            degradedSources=degraded,
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
+        # 예전엔 여기서 mock 문서를 반환해서, 백엔드가 고장난 상황이 "가짜 사내 문서"로 보였다.
+        # 실패는 실패로 알린다.
         print(f"검색 중 에러: {e}")
-        # 예외 발생 시 Mock 반환
-        return SearchResponse(documents=mock_documents, summary=mock_summary)
+        raise HTTPException(status_code=500, detail="검색 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.")

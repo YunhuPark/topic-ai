@@ -58,3 +58,18 @@
   color: var(--danger);
   margin: 0;
 }
+
+/* 연동 해제 버튼 — 연결 버튼보다 눈에 덜 띄게 */
+.google-link__button--secondary {
+  margin-top: var(--space-1, 4px);
+  background: transparent;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  color: var(--color-text-secondary, #6b7280);
+  font-size: 0.8rem;
+}
+
+.google-link__button--secondary:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.08);
+  border-color: rgba(239, 68, 68, 0.35);
+  color: #ef4444;
+}

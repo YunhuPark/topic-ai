@@ -92,12 +92,16 @@ python rag_pipeline.py --source gitlab
 4. 검색되길 원하는 채널에서 `/invite @앱이름`으로 봇 초대
 5. 최근 90일 이내 메시지만 대상 (`connectors/slack_connector.py`의 `SLACK_LOOKBACK_DAYS`로 조정 가능)
 
-### Google Drive (Google Docs만 지원)
-1. [console.cloud.google.com](https://console.cloud.google.com)에서 프로젝트 생성 → "Google Drive API" 활성화
+### Google Drive (Docs/Sheets/Slides/PDF/DOCX/XLSX/PPTX/HWPX 지원)
+1. [console.cloud.google.com](https://console.cloud.google.com)에서 프로젝트 생성 → "Google Drive API"와
+   "Google Sheets API" 둘 다 활성화 (Sheets 문서를 읽으려면 Sheets API도 켜야 함)
 2. IAM 및 관리자 → 서비스 계정 → 서비스 계정 만들기 (역할 부여 단계는 건너뛰기)
 3. 만든 서비스 계정 → 키 → 새 키 만들기 → JSON → 다운로드
 4. 다운받은 파일을 `backend/gdrive_service_account.json`으로 저장
-5. 서비스 계정 이메일(`...@...iam.gserviceaccount.com`)을 검색되길 원하는 Google Docs에 뷰어로 공유
+5. 서비스 계정 이메일(`...@...iam.gserviceaccount.com`)을 검색되길 원하는 파일에 뷰어로 공유
+
+> 레거시 바이너리 `.hwp`(2014년 이전 한글 포맷)와 구버전 MS Office(`.doc`/`.xls`/`.ppt`), 스캔
+> 이미지로만 된 PDF는 지원하지 않습니다 — 최신 포맷(HWPX 등)으로 다시 저장하거나 PDF로 내보내면 됩니다.
 
 ### GitHub (Issues/PR만 지원)
 1. [github.com/settings/tokens](https://github.com/settings/tokens)에서 Personal Access Token 발급
@@ -133,8 +137,9 @@ python rag_pipeline.py --source gitlab
 사이드바에서 각각 계정을 연결하면, 그 사람이 실제로 접근 가능한 문서/저장소/프로젝트/채널/페이지만
 검색에 노출됩니다 (연결 안 하면 그 소스는 결과에서 아예 빠집니다 — 기본 거부).
 
-- **Google Drive**: 로그인 화면 하단 "Google Drive 연결" — access token은 브라우저 세션에만 보관되고
-  수명이 짧아(약 1시간) 세션이 바뀌면 다시 연결해야 할 수 있습니다.
+- **Google Drive**: "Google Drive 연결" — GitHub/GitLab과 같은 표준 OAuth Authorization Code
+  플로우입니다(`GOOGLE_OAUTH_CLIENT_ID`/`SECRET` 필요). refresh_token이 서버에 저장되므로 한 번
+  연결하면 계속 유지되고, 자동 재동기화 대상에도 포함됩니다.
 - **GitHub / GitLab**: "GitHub 연결" / "GitLab 연결" — 둘 다 표준 OAuth Authorization Code 플로우라
   별도로 `GITHUB_OAUTH_CLIENT_ID`/`SECRET`, `GITLAB_OAUTH_CLIENT_ID`/`SECRET`이 `.env`에 필요합니다
   (아래 커넥터용 `GITHUB_TOKEN`/`GITLAB_TOKEN`과는 다른 앱). access token은 서버에 저장되어 한 번
@@ -152,10 +157,15 @@ python rag_pipeline.py --source gitlab
 
 ### 계정 연결용 OAuth 앱 설정 (커넥터 설정과 별개)
 
-**Google (Drive 권한 필터링용)**
-1. [console.cloud.google.com](https://console.cloud.google.com) → 프로젝트 → API 및 서비스 → **OAuth 동의 화면** 설정 (외부, 테스트 모드면 테스트 사용자에 본인 계정 추가)
-2. API 및 서비스 → **사용자 인증 정보 → OAuth 클라이언트 ID → 웹 애플리케이션**, 승인된 자바스크립트 원본에 `http://localhost:5173` 추가
-3. 발급된 클라이언트 ID를 프로젝트 루트 `.env`(프론트엔드용, `backend/.env`가 아님)의 `VITE_GOOGLE_CLIENT_ID`에 입력
+**Google (Drive 권한 필터링 + 자동 재동기화용)**
+1. [console.cloud.google.com](https://console.cloud.google.com) → 프로젝트 → "Google Drive API"와
+   "Google Sheets API" 활성화 → API 및 서비스 → **OAuth 동의 화면** 설정 (외부, 테스트 모드면 테스트
+   사용자에 본인 계정 추가 — 검증 안 받은 앱은 테스트 사용자만 로그인 가능)
+2. API 및 서비스 → **사용자 인증 정보 → OAuth 클라이언트 ID → 웹 애플리케이션**, 승인된 리디렉션
+   URI에 `http://localhost:8000/api/v1/auth/link/google/callback` 추가 (GitHub/GitLab과 같은 서버
+   사이드 플로우라, 클라이언트 시크릿이 있는 이 타입이어야 함 — 예전 버전이 쓰던 프론트 전용
+   클라이언트 ID/`VITE_GOOGLE_CLIENT_ID`와는 다름)
+3. 발급된 Client ID/Secret을 `backend/.env`의 `GOOGLE_OAUTH_CLIENT_ID`/`GOOGLE_OAUTH_CLIENT_SECRET`에 입력
 
 **GitHub (저장소 권한 필터링용)**
 1. [github.com/settings/developers](https://github.com/settings/developers) → OAuth Apps → **New OAuth App**
@@ -185,11 +195,23 @@ python rag_pipeline.py --source gitlab
 4. 클라이언트 ID/시크릿(시크릿은 눈 아이콘으로 표시)을 `backend/.env`의
    `NOTION_OAUTH_CLIENT_ID`/`NOTION_OAUTH_CLIENT_SECRET`에 입력
 
+## 자동 재동기화
+
+계정 연동 시점에 그 사람이 접근 가능한 문서 전체를 수집하고, 그 이후로도 **5개 소스 전부**를
+`AUTO_RESYNC_INTERVAL_SECONDS`(기본 900초=15분)마다 백그라운드에서 다시 확인합니다
+(`backend/.env`에서 조정 가능).
+
+재동기화는 **증분**입니다 — 목록 조회는 매번 하지만(원본에서 삭제된 문서를 알아내야 하므로),
+본문을 다시 받아 임베딩하는 건 원본의 수정 시각이나 내용이 실제로 바뀐 문서뿐입니다. 그래서
+문서가 그대로면 주기당 임베딩 비용이 0에 수렴합니다. 원본에서 삭제되거나 접근 권한을 잃은
+문서는 자동으로 정리되고, 사이드바에서 **연동을 해제하면** 그 소스로 가져왔던 문서도 함께
+정리됩니다.
+
 ## 알려진 운영 이슈
 
 - Chroma는 다른 프로세스가 쓴 내용을 자동으로 다시 읽지 않으므로, 적재 스크립트 실행 후 API 서버를 재시작해야 합니다.
 - Windows 콘솔(cp949)은 이모지를 못 그려서, 로그에 이모지를 쓰면 print 자체가 예외를 던질 수 있습니다 (`main.py`/`rag_pipeline.py` 상단에서 UTF-8로 재설정해 처리 중).
-- Google Drive 커넥터는 Google Docs(`application/vnd.google-apps.document`)만 지원합니다. Sheets/Slides/PDF는 범위 밖입니다.
+- Google Drive 커넥터는 Docs/Sheets/Slides/PDF/DOCX/XLSX/PPTX/HWPX를 지원합니다. 스캔 이미지로만 된 PDF, 레거시 `.hwp`, 구버전 MS Office(`.doc`/`.xls`/`.ppt`)는 범위 밖입니다.
 
 ## 프론트엔드 상세
 

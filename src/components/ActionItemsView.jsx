@@ -2,17 +2,28 @@ import { useEffect, useState } from 'react';
 import './Dashboard.css';
 import './AISummaryPanel.css';
 import { getSourceMeta } from '../data/mockData';
-import { getAllActionItems, toggleActionItemStatus } from '../utils/actionItemsStore';
+import { getAllActionItems, toggleActionItemStatus, deleteActionItem } from '../utils/actionItemsStore';
 
 export default function ActionItemsView() {
   const [items, setItems] = useState([]);
+  const [error, setError] = useState('');
 
   useEffect(() => {
-    getAllActionItems().then(setItems);
+    getAllActionItems()
+      .then(setItems)
+      .catch((e) => setError(e.message));
   }, []);
 
+  // 실패해도 목록을 비우지 않는다 — 예전엔 오류 시 빈 배열을 넣어서, 한 번의 네트워크 오류로
+  // 할 일이 전부 사라진 것처럼 보였다.
   const handleToggle = (id) => {
-    toggleActionItemStatus(id).then(setItems);
+    setError('');
+    toggleActionItemStatus(id).then(setItems).catch((e) => setError(e.message));
+  };
+
+  const handleDelete = (id) => {
+    setError('');
+    deleteActionItem(id).then(setItems).catch((e) => setError(e.message));
   };
 
   const openCount = items.filter((i) => i.status !== 'completed').length;
@@ -24,7 +35,7 @@ export default function ActionItemsView() {
           <div className="dashboard__hero-greeting">
             <span className="dashboard__hero-wave">⚡</span>
             <h1 className="dashboard__hero-title">
-              <span className="gradient-text">액션 아이템</span>
+              <span className="gradient-text">할 일 리스트</span>
             </h1>
           </div>
           <p className="dashboard__hero-subtitle">
@@ -35,7 +46,7 @@ export default function ActionItemsView() {
 
       <div className="dashboard__card glass-panel animate-fade-in-up delay-2">
         <div className="dashboard__card-header">
-          <h2 className="dashboard__card-title">할 일 목록</h2>
+          <h2 className="dashboard__card-title">할 일 리스트</h2>
           <span className="dashboard__card-badge">{openCount}개 진행 중</span>
         </div>
         {items.length > 0 && (
@@ -46,10 +57,11 @@ export default function ActionItemsView() {
             <span className="ai-panel__action-legend-item"><span className="ai-panel__action-status ai-panel__action-status--completed ai-panel__action-status--mini">✓</span> 완료</span>
           </div>
         )}
+        {error && <p className="dashboard__empty" role="alert">⚠️ {error}</p>}
         <div className="ai-panel__action-list">
-          {items.length === 0 && (
+          {items.length === 0 && !error && (
             <p className="dashboard__empty">
-              아직 액션 아이템이 없습니다. 통합 검색을 실행하면 AI가 자동으로 추출해서 여기 쌓입니다.
+              아직 할 일이 없습니다. 통합 검색을 실행하면 AI가 자동으로 추출해서 여기 쌓입니다.
             </p>
           )}
           {items.map((item) => {
@@ -80,6 +92,14 @@ export default function ActionItemsView() {
                     {source.icon}
                   </span>
                 )}
+                <button
+                  className="ai-panel__action-delete"
+                  onClick={() => handleDelete(item.id)}
+                  title="이 할 일 삭제"
+                  aria-label="이 할 일 삭제"
+                >
+                  ✕
+                </button>
               </div>
             );
           })}

@@ -115,6 +115,13 @@ export default function TopicThread({ documents, onDocSelect, selectedDoc }) {
 
       {/* Document List */}
       <div className="topic-thread__list">
+        {sortedDocs.length === 0 && (
+          // 권한 필터로 결과가 0건인 경우 — 예전엔 "0개 문서 발견"과 빈 목록만 남아서
+          // 왜 아무것도 없는지 알 수 없었다. 이유는 오른쪽 요약 패널에 들어있다.
+          <p className="topic-thread__empty">
+            표시할 수 있는 문서가 없습니다. 오른쪽 요약에서 이유를 확인해 주세요.
+          </p>
+        )}
         {sortedDocs.map((doc, index) => (
           <div key={doc.id} className={`animate-fade-in-up delay-${index + 1}`}>
             <DocumentCard

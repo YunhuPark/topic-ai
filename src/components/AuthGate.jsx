@@ -3,7 +3,7 @@ import AuthPanel from './AuthPanel';
 
 // 로그아웃 상태에서 앱 전체를 가리는 전체 화면 로그인 게이트.
 // AuthModal과 카드 스타일은 같지만, 닫을 수 없고(뒤에 볼 앱이 없음) 페이지 자체다.
-export default function AuthGate({ onAuthenticated }) {
+export default function AuthGate({ onAuthenticated, notice }) {
   return (
     <div className="auth-modal__backdrop auth-gate">
       <div className="auth-modal__card glass-panel">
@@ -23,7 +23,7 @@ export default function AuthGate({ onAuthenticated }) {
           </div>
           <h2 className="auth-modal__title gradient-text">TopicThread AI</h2>
           <p className="auth-modal__subtitle">
-            흩어진 지식을 하나의 스레드로 — 로그인하고 시작하세요
+            {notice || '흩어진 지식을 하나의 스레드로 — 로그인하고 시작하세요'}
           </p>
         </div>
         <AuthPanel onAuthenticated={onAuthenticated} variant="modal" />

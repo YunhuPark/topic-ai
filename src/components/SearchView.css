@@ -106,3 +106,16 @@
   height: 48px;
   border-radius: var(--radius-md);
 }
+
+/* 검색 실패·연동 만료 안내 — 예전엔 오류가 콘솔에만 찍혀서 화면상으로는
+   "검색 버튼이 안 눌린 것"처럼 보였다 */
+.search-view__error {
+  margin-top: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  color: #b91c1c;
+  font-size: 0.9rem;
+  line-height: 1.5;
+}

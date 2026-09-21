@@ -46,8 +46,8 @@ export default function AISummaryPanel({ summary, selectedDoc }) {
 
   const sections = [
     { id: 'summary', label: '📝 AI 요약', icon: '📝' },
-    { id: 'decisions', label: '🔗 Decision Trail', icon: '🔗' },
-    { id: 'actions', label: '⚡ 액션 아이템', icon: '⚡' },
+    { id: 'decisions', label: '🔗 의사결정 흐름', icon: '🔗' },
+    { id: 'actions', label: '⚡ 할 일 리스트', icon: '⚡' },
   ];
 
   return (
@@ -121,7 +121,7 @@ export default function AISummaryPanel({ summary, selectedDoc }) {
           <div className="ai-panel__decisions animate-fade-in">
             <div className="ai-panel__summary-header">
               <span className="ai-panel__summary-icon">🔗</span>
-              <span className="ai-panel__summary-label">의사결정 히스토리</span>
+              <span className="ai-panel__summary-label">의사결정 흐름</span>
             </div>
             <div className="ai-panel__timeline">
               {summary.decisionTrail.map((item, i) => {
@@ -148,7 +148,7 @@ export default function AISummaryPanel({ summary, selectedDoc }) {
           <div className="ai-panel__actions animate-fade-in">
             <div className="ai-panel__summary-header">
               <span className="ai-panel__summary-icon">⚡</span>
-              <span className="ai-panel__summary-label">자동 추출된 액션 아이템</span>
+              <span className="ai-panel__summary-label">자동 추출된 할 일 리스트</span>
             </div>
             <div className="ai-panel__action-list">
               {summary.actionItems.map((item, i) => (
