@@ -1,9 +1,12 @@
-"""GitLab 프로젝트의 Issue/Merge Request(본문+댓글)와 프로젝트 자체(설명+README)를
-읽어와 Topic Thread AI의 공통 문서 포맷(dict)으로 변환한다. 쓰기 작업은 하지 않는다.
+"""GitLab 프로젝트의 Issue/Merge Request(본문+댓글), 프로젝트 자체(설명+README),
+그리고 프로젝트 파일 전체(소스 코드 포함)를 읽어와 Topic Thread AI의 공통 문서
+포맷(dict)으로 변환한다. 쓰기 작업은 하지 않는다.
 위키는 Out of scope (github_connector.py와 동일한 스코프 결정을 따름).
 
 프로젝트 문서(설명+README)를 따로 만드는 이유는 github_connector.py와 동일 —
-Issue/MR이 하나도 없는 프로젝트도 검색 대상에 들어가야 한다.
+Issue/MR이 하나도 없는 프로젝트도 검색 대상에 들어가야 한다. 파일 전체 색인도
+github_connector.py와 같은 패턴: 텍스트로 디코드되는 파일은 본문까지, 바이너리는
+파일명만.
 
 사전 준비 (사용자가 GitLab에서 직접 해야 하는 것):
 1. GitLab > 설정(Preferences) > Access Tokens 에서 Personal Access Token 발급
@@ -16,6 +19,7 @@ Issue/MR이 하나도 없는 프로젝트도 검색 대상에 들어가야 한�
 import os
 import time
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -161,6 +165,98 @@ def project_document_id(project_path: str) -> str:
     return f"gitlab-{project_path}#readme"
 
 
+# 프로젝트 하나당 색인할 파일 수 상한 — 없으면 대형 프로젝트 하나가 동기화 주기를 다 잡아먹는다.
+GITLAB_MAX_FILES_PER_PROJECT = 500
+# 본문을 읽기엔 너무 큰 파일(생성된 번들 등) 기준 — 이보다 크면 파일명만 색인한다.
+_MAX_FILE_BYTES = 200_000
+# 내용은 진짜 코드지만 순수 자동 생성물이라 검색 가치가 없는 잠금 파일 — 파일명만 색인한다.
+_LOCK_FILENAMES = {
+    "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "cargo.lock",
+    "poetry.lock", "pipfile.lock", "composer.lock", "gemfile.lock",
+}
+
+
+def project_file_document_id(project_path: str, path: str) -> str:
+    return f"gitlab-{project_path}::{path}"
+
+
+# github_connector.py와 동일한 이유 — .gitignore 없이 venv/node_modules 전체가 그대로
+# 커밋된 저장소가 실제로 발견됨(GitHub 쪽에서, 5697개 중 5587개). 경로 기반으로 걸러낸다.
+_VENDOR_PATH_SEGMENTS = (
+    "/venv/", "/.venv/", "/env/", "/site-packages/", "/node_modules/",
+    "/__pycache__/", "/vendor/", "/.tox/", "/dist-packages/",
+)
+
+
+def _is_vendored_path(path: str) -> bool:
+    p = f"/{path}/"
+    return any(seg in p for seg in _VENDOR_PATH_SEGMENTS)
+
+
+def _list_project_tree(project_id: str, headers: dict) -> list[dict]:
+    """기본 브랜치의 전체 파일 트리(파일만, blob 타입)를 가져온다."""
+    try:
+        items = _paginate(f"/projects/{project_id}/repository/tree", {"recursive": "true"}, headers)
+    except requests.HTTPError as e:
+        if e.response is not None and e.response.status_code == 404:
+            return []  # 커밋이 없는 빈 프로젝트
+        raise
+    return [
+        item for item in items
+        if item.get("type") == "blob" and not _is_vendored_path(item.get("path", ""))
+    ]
+
+
+def _fetch_file_text(project_id: str, path: str, ref: str, headers: dict) -> Optional[str]:
+    """None이면 본문을 못 읽는(또는 안 읽는) 파일이라는 뜻 — 바이너리거나 너무 큼."""
+    encoded_path = urllib.parse.quote(path, safe="")
+    try:
+        resp = _request(
+            "GET", f"/projects/{project_id}/repository/files/{encoded_path}/raw",
+            headers, params={"ref": ref},
+        )
+    except requests.HTTPError as e:
+        if e.response is not None and e.response.status_code == 404:
+            return None
+        raise
+    raw = resp.content
+    if len(raw) > _MAX_FILE_BYTES or b"\x00" in raw[:8000]:  # null byte = 거의 확실히 바이너리
+        return None
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def _file_to_document(
+    project_path: str, project_id: str, item: dict, ref: str, headers: dict, project_meta: dict
+) -> dict:
+    path = item["path"]
+    name = path.rsplit("/", 1)[-1].lower()
+    content = None if name in _LOCK_FILENAMES else _fetch_file_text(project_id, path, ref, headers)
+    if content is None:
+        content = f"(미리보기를 지원하지 않는 파일이라 본문 내용은 없습니다 — 파일명으로만 검색됩니다: {path})"
+
+    updated_at = project_meta.get("last_activity_at") or ""
+    namespace = project_path.split("/")[0]
+
+    return {
+        "id": project_file_document_id(project_path, path),
+        "title": f"{project_path} — {path}",
+        "source": "gitlab",
+        "author": namespace,
+        "authorAvatar": namespace[:2],
+        "date": (updated_at or "")[:10] or "1970-01-01",
+        "content": content,
+        "tags": ["gitlab", project_path, "file"],
+        "freshness": "fresh",
+        "relevance": 1.0,
+        "sourceUrl": f"{project_meta.get('web_url', '')}/-/blob/{ref}/{path}",
+        # blob sha 자체가 내용 해시라 시각보다 더 정확한 변경 감지 기준이 된다.
+        "sourceUpdatedAt": item["id"],
+    }
+
+
 def _fetch_project_readme(project_id: str, meta: dict, headers: dict) -> str:
     """README 원문을 가져온다. GitLab에는 GitHub의 '/readme' 같은 전용 엔드포인트가 없어서,
     프로젝트 메타의 readme_url(예: .../-/blob/main/README.md)에서 브랜치·경로를 뽑아
@@ -227,6 +323,35 @@ def _fetch_project_documents(
     if not (project_updated_at and known.get(proj_doc_id) == project_updated_at):
         documents.append(_project_to_document(project_path, project_id, project_meta, headers))
 
+    # 프로젝트 파일 전체 — README뿐 아니라 실제 소스 코드/설정도 검색 대상이 돼야 한다는 요구.
+    default_branch = project_meta.get("default_branch", "main")
+    tree = _list_project_tree(project_id, headers)
+    if len(tree) > GITLAB_MAX_FILES_PER_PROJECT:
+        print(f"'{project_path}' 파일이 {len(tree)}개라 상한({GITLAB_MAX_FILES_PER_PROJECT})까지만 색인합니다.")
+        tree = tree[:GITLAB_MAX_FILES_PER_PROJECT]
+
+    to_fetch = []
+    for item in tree:
+        file_doc_id = project_file_document_id(project_path, item["path"])
+        seen_ids.add(file_doc_id)
+        if known.get(file_doc_id) != item["id"]:  # blob sha가 그대로면 내용도 그대로라 건너뜀
+            to_fetch.append(item)
+
+    if to_fetch:
+        with ThreadPoolExecutor(max_workers=min(8, len(to_fetch))) as pool:
+            futures = {
+                pool.submit(
+                    _file_to_document, project_path, project_id, item, default_branch, headers, project_meta
+                ): item
+                for item in to_fetch
+            }
+            for future in as_completed(futures):
+                item = futures[future]
+                try:
+                    documents.append(future.result())
+                except Exception as e:
+                    print(f"'{project_path}' 파일 '{item['path']}' 읽기 실패, 건너뜁니다: {e}")
+
     for kind, items in (
         ("issue", _list_recent_issues(project_id, since_iso, headers)),
         ("merge_request", _list_recent_merge_requests(project_id, since_iso, headers)),
@@ -285,8 +410,9 @@ def fetch_gitlab_documents_for_user(
             # 프로젝트 하나의 실패가 나머지 전체 수집을 죽이지 않도록. 확인에 실패한 프로젝트의
             # 기존 문서는 "그대로 있는 것"으로 쳐서 일시적 오류로 삭제되지 않게 한다.
             print(f"'{project_path}' 수집 실패, 이번 주기에는 건너뜁니다: {e}")
-            prefix = f"gitlab-{project_path}#"
-            seen_ids |= {doc_id for doc_id in known if doc_id.startswith(prefix)}
+            # Issue/MR/프로젝트개요('#')와 파일('::') 두 id 체계 모두 살아있는 것으로 되돌려야 한다.
+            prefixes = (f"gitlab-{project_path}#", f"gitlab-{project_path}::")
+            seen_ids |= {doc_id for doc_id in known if doc_id.startswith(prefixes)}
             continue
         documents.extend(project_docs)
         seen_ids |= project_seen

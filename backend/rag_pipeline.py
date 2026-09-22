@@ -1,8 +1,10 @@
 import hashlib
 import json
 import os
+import re
 import sys
 import threading
+import time
 from datetime import datetime, timezone
 from typing import List, Optional
 from dotenv import load_dotenv
@@ -19,7 +21,7 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 from langchain_community.vectorstores import Chroma
-from openai import OpenAI
+from openai import OpenAI, RateLimitError
 
 from dummy_data import mock_documents
 from models import Summary
@@ -76,6 +78,18 @@ class OpenAIDirectEmbeddings(Embeddings):
                 try:
                     resp = client.embeddings.create(model=self.model, input=batch)
                     break
+                except RateLimitError as e:
+                    # 개별 요청 크기가 아니라 "분당 처리량(TPM)" 조직 전체 한도 초과 — 실사용 중
+                    # GitHub 저장소 전체 색인처럼 한 번에 텍스트 양이 많을 때 실제로 겪었다.
+                    # 이건 잘라도 소용없고 기다렸다 그대로 재시도해야 한다. 에러 메시지가
+                    # "try again in 1.162s" 식으로 대기 시간을 알려주면 그걸 쓰고, 없으면
+                    # 지수 백오프.
+                    if attempt >= 4:
+                        raise
+                    match = re.search(r"try again in ([\d.]+)s", str(e))
+                    wait = float(match.group(1)) if match else 2 ** attempt
+                    time.sleep(wait + 0.5)
+                    continue
                 except Exception as e:
                     # 상한을 넘긴 경우엔 더 짧게 잘라 다시 시도(어림치가 빗나간 경우 대비) —
                     # 실제로 어림치 통과 후("under 7500 tokens") 진짜 토큰 수는 8192를 넘겨

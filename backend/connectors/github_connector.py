@@ -18,6 +18,7 @@ import base64
 import os
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -56,14 +57,28 @@ def _get_target_repos() -> list[str]:
 
 
 def _request(method: str, path: str, headers: dict, **kwargs) -> requests.Response:
-    """GitHub API 요청 공통 래퍼. rate limit이면 X-RateLimit-Reset까지 기다렸다 재시도."""
+    """GitHub API 요청 공통 래퍼. rate limit이면 X-RateLimit-Reset까지 기다렸다 재시도.
+
+    저장소 파일 전체를 병렬로 여러 개 두드릴 때(_fetch_repo_documents의 ThreadPoolExecutor),
+    GitHub의 남용 방지(abuse detection)가 순간적으로 401/403을 뱉었다가 몇 초 뒤엔 같은
+    토큰으로 멀쩡히 통과되는 걸 실사용 중 확인함 — 그런 일시적 실패도 짧게 쉬었다 재시도한다."""
     url = f"{GITHUB_API_BASE}{path}" if path.startswith("/") else path
-    for attempt in range(3):
+    for attempt in range(5):
         resp = requests.request(method, url, headers=headers, timeout=30, **kwargs)
         if resp.status_code == 403 and resp.headers.get("X-RateLimit-Remaining") == "0":
             reset_at = int(resp.headers.get("X-RateLimit-Reset", time.time() + 5))
             wait = max(reset_at - time.time(), 1)
+            # 실제로 겪은 문제: 저장소 파일 전체를 병렬로 두드리다 시간당 한도(5000)를
+            # 다 쓰면 reset까지 최대 1시간 가까이 남을 수 있는데, 이걸 그대로 기다리면
+            # 동기화 전체가 CPU 0%로 몇십 분씩 "멈춘 것처럼" 보인다. 짧으면 기다리고,
+            # 길면 이 요청은 포기해서 상위(_fetch_repo_documents)의 "저장소 하나 실패,
+            # 나머지는 계속 진행" 처리로 넘긴다.
+            if wait > 120:
+                raise RuntimeError(f"GitHub API 시간당 한도 초과, {int(wait)}초 후 재시도 필요")
             time.sleep(wait)
+            continue
+        if resp.status_code in (401, 403, 500, 502, 503, 504) and attempt < 4:
+            time.sleep(2 ** attempt)
             continue
         resp.raise_for_status()
         return resp
@@ -211,9 +226,22 @@ def repo_file_document_id(owner: str, repo: str, path: str) -> str:
     return f"github-{owner}/{repo}::{path}"
 
 
+# .gitignore된 파일은 git 자체가 안 갖고 있어서 애초에 트리에 안 잡히는 게 보통이지만,
+# 실사용 중 .gitignore 없이 venv/site-packages 전체(5697개 중 5587개)가 그대로 커밋된
+# 저장소를 발견함 — Drive 사고와 똑같은 패턴이라 경로 기반으로 걸러낸다.
+_VENDOR_PATH_SEGMENTS = (
+    "/venv/", "/.venv/", "/env/", "/site-packages/", "/node_modules/",
+    "/__pycache__/", "/vendor/", "/.tox/", "/dist-packages/",
+)
+
+
+def _is_vendored_path(path: str) -> bool:
+    p = f"/{path}/"
+    return any(seg in p for seg in _VENDOR_PATH_SEGMENTS)
+
+
 def _list_repo_tree(owner: str, repo: str, default_branch: str, headers: dict) -> list[dict]:
-    """기본 브랜치의 전체 파일 트리(파일만, blob 타입)를 가져온다. .gitignore된 파일은
-    git 자체가 안 갖고 있어서 애초에 여기 안 잡힌다 — Drive처럼 별도로 걸러낼 필요가 적다."""
+    """기본 브랜치의 전체 파일 트리(파일만, blob 타입)를 가져온다."""
     try:
         resp = _request(
             "GET", f"/repos/{owner}/{repo}/git/trees/{default_branch}", headers,
@@ -225,7 +253,10 @@ def _list_repo_tree(owner: str, repo: str, default_branch: str, headers: dict) -
         raise
     if resp.get("truncated"):
         print(f"'{owner}/{repo}' 파일 트리가 너무 커서 GitHub API가 일부만 내려줬습니다.")
-    return [item for item in resp.get("tree", []) if item.get("type") == "blob"]
+    return [
+        item for item in resp.get("tree", [])
+        if item.get("type") == "blob" and not _is_vendored_path(item.get("path", ""))
+    ]
 
 
 def _fetch_blob_text(owner: str, repo: str, sha: str, headers: dict) -> Optional[str]:
@@ -294,15 +325,28 @@ def _fetch_repo_documents(
     if len(tree) > GITHUB_MAX_FILES_PER_REPO:
         print(f"'{owner}/{repo}' 파일이 {len(tree)}개라 상한({GITHUB_MAX_FILES_PER_REPO})까지만 색인합니다.")
         tree = tree[:GITHUB_MAX_FILES_PER_REPO]
+
+    to_fetch = []
     for item in tree:
         file_doc_id = repo_file_document_id(owner, repo, item["path"])
         seen_ids.add(file_doc_id)
-        if known.get(file_doc_id) == item["sha"]:
-            continue  # blob sha가 그대로 → 내용도 그대로
-        try:
-            documents.append(_file_to_document(owner, repo, item, headers, repo_meta))
-        except Exception as e:
-            print(f"'{owner}/{repo}' 파일 '{item['path']}' 읽기 실패, 건너뜁니다: {e}")
+        if known.get(file_doc_id) != item["sha"]:  # blob sha가 그대로면 내용도 그대로라 건너뜀
+            to_fetch.append(item)
+
+    # 파일마다 blob API를 순차 호출하면 파일 많은 저장소에서 동기화 한 번에 몇 분씩 걸린다 —
+    # 권한 확인(main.py._resolve_permissions)과 같은 패턴으로 병렬화한다.
+    if to_fetch:
+        with ThreadPoolExecutor(max_workers=min(8, len(to_fetch))) as pool:
+            futures = {
+                pool.submit(_file_to_document, owner, repo, item, headers, repo_meta): item
+                for item in to_fetch
+            }
+            for future in as_completed(futures):
+                item = futures[future]
+                try:
+                    documents.append(future.result())
+                except Exception as e:
+                    print(f"'{owner}/{repo}' 파일 '{item['path']}' 읽기 실패, 건너뜁니다: {e}")
 
     for issue in _list_recent_issues(owner, repo, since_iso, headers):
         doc_id = issue_document_id(owner, repo, issue["number"])

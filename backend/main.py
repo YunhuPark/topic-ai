@@ -133,12 +133,19 @@ def _keyword_boost(query: str, title: str, content: str, source_name: str = "") 
     출처 이름(저장소/프로젝트/채널명) 일치가 가장 강한 신호로 취급된다 — 실제 검증: "medi" 검색 시
     "Medi-Matrix" 저장소 자체의 PR보다, 그 저장소를 본문에서 언급만 한 다른 저장소("portfolio")의
     문서가 앞서는 문제를 발견함. 특정 프로젝트를 가리키는 것이 명백한 짧은 질의어는 그 프로젝트
-    "자체"의 문서를 최우선해야 자연스럽다."""
+    "자체"의 문서를 최우선해야 자연스럽다.
+
+    분모는 항상 2.0으로 고정한다 — 예전엔 source_name이 있는 소스(Slack/GitHub/GitLab)는
+    분모를 3.0으로 썼는데, 그러면 "출처 이름과는 무관하게 본문에만 이름이 언급된" 경우
+    (예: Slack 대화 중 "승현님께 부탁드릴게요")가 Notion/Drive의 같은 본문 언급보다 부당하게
+    낮은 점수를 받았다(0.333 vs 0.5) — 실제로 이것 때문에 관련도 임계값을 근소하게 못 넘겨
+    검색 결과에서 빠지는 사례를 발견함. 출처 이름 일치는 여전히 가장 강한 신호이되(3.0점),
+    그 경우 1.0을 넘을 수 있어 최종적으로 1.0에서 자른다 — 어차피 "완벽한 일치"라는 의미는
+    그대로 유지된다."""
     tokens = [t for t in re.findall(r"[\w가-힣]+", query.lower()) if len(t) >= 2]
     if not tokens:
         return 0.0
     title_l, content_l, source_l = title.lower(), content.lower(), source_name.lower()
-    weight_per_token = 3.0 if source_l else 2.0
     score = 0.0
     for t in tokens:
         if source_l and t in source_l:
@@ -147,17 +154,21 @@ def _keyword_boost(query: str, title: str, content: str, source_name: str = "") 
             score += 2.0  # 제목 일치가 본문 일치보다 훨씬 강한 신호
         elif t in content_l:
             score += 1.0
-    return score / (len(tokens) * weight_per_token)
+    return min(1.0, score / (len(tokens) * 2.0))
 
 
 def _title_match_candidates(vectorstore, query: str, exclude_ids: set[str]) -> list[Document]:
-    """벡터 유사도로는 상위 후보(SEARCH_CANDIDATE_POOL)에 아예 못 드는 문서를, 제목에 검색어가
-    그대로 들어있으면 구제한다. _keyword_boost는 이미 뽑힌 후보 안에서만 재정렬하므로, 벡터
-    거리가 애초에 너무 멀면(예: 스캔 악보 PDF처럼 본문 텍스트가 의미 없는 문서) 제목이 정확히
-    일치해도 후보에 들지 못해 키워드 보정이 손 쓸 기회조차 없다 — 실제 사례: "붕붕" 검색 시
-    제목이 "김하온-붕붕.pdf"인 문서가 상위 40위 안에도 못 듦(본문이 악보 표기라 임베딩이
-    질의어와 무관). 컬렉션 전체를 훑는 건 지금 규모(수백 건)에서만 괜찮은 임시방편 — 문서가
-    훨씬 많아지면 SQLite FTS 같은 진짜 텍스트 검색 인덱스로 바꿔야 한다."""
+    """벡터 유사도로는 상위 후보(SEARCH_CANDIDATE_POOL)에 아예 못 드는 문서를, 제목이나 본문에
+    검색어가 그대로 들어있으면 구제한다. _keyword_boost는 이미 뽑힌 후보 안에서만 재정렬하므로,
+    벡터 거리가 애초에 너무 멀면(예: 스캔 악보 PDF처럼 본문 텍스트가 의미 없는 문서) 제목이
+    정확히 일치해도 후보에 들지 못해 키워드 보정이 손 쓸 기회조차 없다 — 실제 사례: "붕붕" 검색
+    시 제목이 "김하온-붕붕.pdf"인 문서가 상위 40위 안에도 못 듦(본문이 악보 표기라 임베딩이
+    질의어와 무관).
+    본문도 같이 보는 이유: Slack 대화처럼 제목이 그 묶음의 "첫 메시지 요약"이라서, 실제로
+    찾으려는 언급("승현님")이 제목이 아니라 대화 중간(본문)에만 있는 경우가 흔하다 — 제목만
+    보면 이런 케이스를 계속 놓친다.
+    컬렉션 전체를 훑는 건 지금 규모(수백 건)에서만 괜찮은 임시방편 — 문서가 훨씬 많아지면
+    SQLite FTS 같은 진짜 텍스트 검색 인덱스로 바꿔야 한다."""
     query_lower = query.strip().lower()
     if not query_lower:
         return []
@@ -167,7 +178,9 @@ def _title_match_candidates(vectorstore, query: str, exclude_ids: set[str]) -> l
         doc_id = meta.get("id")
         if not doc_id or doc_id in exclude_ids:
             continue
-        if query_lower in (meta.get("title") or "").lower():
+        title_l = (meta.get("title") or "").lower()
+        body_l = (meta.get("content") or "").lower()
+        if query_lower in title_l or query_lower in body_l:
             matches.append(Document(page_content=content, metadata=meta))
     return matches
 
