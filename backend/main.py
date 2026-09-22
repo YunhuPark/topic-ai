@@ -768,12 +768,20 @@ def search_documents(
         # 줬는데(distance=2.0), 그러면 제목 일치(keyword_score 최대 1.0 → combined 0.35로
         # 간신히 통과)만 우연히 넘어가고, 본문에만 일치하는 경우(keyword_score 최대 0.5 →
         # combined 0.175)는 임계값을 절대 못 넘어서 이 구제 로직 자체가 사실상 죽은 코드였다
-        # (코드 리뷰로 발견) — 애초에 "승현" 검색이 됐던 건 그 Slack 문서가 벡터 후보에
-        # 이미 들어있었기 때문이지 이 구제 경로 덕분이 아니었다. 문자 그대로 일치한다는 것
-        # 자체가 이미 강한 신호이므로, 관련도를 0이 아니라 0.3(최소 기준)으로 준다.
+        # (코드 리뷰로 발견).
+        #
+        # 관련도를 0.3으로 줬다가 또 다른 문제가 드러남: 이 앱 코드 저장소 자체가 GitHub
+        # 색인 대상이라서, 오늘 이 버그를 고치며 코드 주석·PRD.md·HANDOFF.md에 "승현"을
+        # 예시로 반복해서 적어놨는데, 그 파일들이 전부 구제 경로로 걸려 0.3 고정 관련도 +
+        # keyword_score 0.5(본문 일치 최소값)로 정확히 같은 점수(0.37)를 받았다. 반면 진짜
+        # 원인이었던 Slack 문서는 실제 벡터 관련도가 0.292(우연히 0.3보다 낮음)라 combined
+        # 0.365로 그 인위적인 동점자들보다 밀려 상위 4개에서 잘렸다. 관련도를 "임계값을
+        # 겨우 넘기는 최소값"(0.27)으로 낮추면, 진짜 벡터 유사도가 조금이라도 있는 문서가
+        # 순수 구제 문서보다 항상 앞서게 된다 — 구제는 "0점을 최소 통과선까지만" 끌어올리는
+        # 역할이지, 진짜 유사도보다 우대돼서는 안 된다.
         existing_ids = {d.metadata.get("id") for d, _ in results}
         title_matches = _title_match_candidates(vectorstore, q, existing_ids)
-        RESCUE_BASE_RELEVANCE = 0.3
+        RESCUE_BASE_RELEVANCE = 0.27
         results = results + [(d, 2 * (1 - RESCUE_BASE_RELEVANCE)) for d in title_matches]
 
         scored_results = []
