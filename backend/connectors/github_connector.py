@@ -63,7 +63,8 @@ def _request(method: str, path: str, headers: dict, **kwargs) -> requests.Respon
     GitHub의 남용 방지(abuse detection)가 순간적으로 401/403을 뱉었다가 몇 초 뒤엔 같은
     토큰으로 멀쩡히 통과되는 걸 실사용 중 확인함 — 그런 일시적 실패도 짧게 쉬었다 재시도한다."""
     url = f"{GITHUB_API_BASE}{path}" if path.startswith("/") else path
-    for attempt in range(5):
+    max_attempts = 7
+    for attempt in range(max_attempts):
         resp = requests.request(method, url, headers=headers, timeout=30, **kwargs)
         if resp.status_code == 403 and resp.headers.get("X-RateLimit-Remaining") == "0":
             reset_at = int(resp.headers.get("X-RateLimit-Reset", time.time() + 5))
@@ -77,8 +78,11 @@ def _request(method: str, path: str, headers: dict, **kwargs) -> requests.Respon
                 raise RuntimeError(f"GitHub API 시간당 한도 초과, {int(wait)}초 후 재시도 필요")
             time.sleep(wait)
             continue
-        if resp.status_code in (401, 403, 500, 502, 503, 504) and attempt < 4:
-            time.sleep(2 ** attempt)
+        if resp.status_code in (401, 403, 500, 502, 503, 504) and attempt < max_attempts - 1:
+            # 실사용 중 이 간헐적 403/401이 5번 재시도(최대 약 15초)로도 안 풀리고 그대로
+            # 실패하는 걸 봤다 — GitHub의 남용 방지가 생각보다 오래(수십 초) 갈 수 있어서
+            # 재시도 횟수와 최대 대기시간을 늘림(최대 약 2분).
+            time.sleep(min(2 ** attempt, 30))
             continue
         resp.raise_for_status()
         return resp
