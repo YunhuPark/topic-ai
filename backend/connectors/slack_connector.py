@@ -154,6 +154,12 @@ def _fetch_thread_replies(channel_id: str, thread_ts: str, headers: dict) -> lis
     return sorted(replies, key=lambda m: float(m["ts"]))[1:]
 
 
+# 첨부 하나가 이 크기를 넘으면 아예 안 받는다(파일명만 색인) — github/gitlab_connector의
+# _MAX_FILE_BYTES와 같은 안전장치. 메시지는 조회 기간(SLACK_LOOKBACK_DAYS) 안이면 매
+# 동기화 주기마다 다시 조회되므로, 상한이 없으면 큰 첨부파일을 매번 다시 받아 파싱하게 된다.
+_MAX_ATTACHMENT_BYTES = 20_000_000
+
+
 def _download_slack_file(url: str, headers: dict) -> bytes:
     resp = requests.get(url, headers=headers, timeout=30)
     resp.raise_for_status()
@@ -169,6 +175,8 @@ def _extract_file_text(f: dict, headers: dict) -> str:
     url = f.get("url_private_download") or f.get("url_private")
     if not url:
         return ""
+    if (f.get("size") or 0) > _MAX_ATTACHMENT_BYTES:
+        return ""  # Slack이 알려주는 크기가 이미 크면 다운로드 자체를 건너뛴다
     try:
         if filetype == "pdf" or name.endswith(".pdf"):
             reader = PdfReader(io.BytesIO(_download_slack_file(url, headers)))

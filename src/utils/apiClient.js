@@ -57,3 +57,13 @@ export async function apiFetch(path, options = {}) {
   if (response.status === 204) return null;
   return response.json();
 }
+
+// 검색 결과에서 문서 하나를 클릭했을 때 그 문서만 다시 요약한다 — 검색 시점 요약은
+// 결과 전체(최대 4개)를 합친 것이라, 문서를 클릭해도 다른 문서 내용이 섞여 나왔다.
+export async function summarizeDocument(query, document) {
+  return apiFetch('/api/v1/summarize-document', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query, document }),
+  });
+}

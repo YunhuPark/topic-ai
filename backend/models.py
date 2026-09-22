@@ -42,6 +42,14 @@ class SearchResponse(BaseModel):
     disconnectedSources: List[str] = []
     degradedSources: List[str] = []
 
+class SummarizeDocumentRequest(BaseModel):
+    # 검색 결과에서 문서 하나를 클릭했을 때 그 문서만 다시 요약하기 위한 요청 — 예전엔
+    # 검색 결과 전체(최대 4개)를 합친 요약을 계속 보여줘서, 다른 문서를 클릭해도 무관한
+    # 내용이 "핵심 포인트"에 섞여 나왔다. 이미 검색 응답으로 받은 문서라 권한은 다시
+    # 확인하지 않는다(그 사람이 이미 본 결과이므로).
+    query: str
+    document: Document
+
 class SourceCount(BaseModel):
     source: str
     count: int

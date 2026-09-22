@@ -455,6 +455,35 @@
   background: var(--success-bg);
 }
 
+.ai-panel__header-scope {
+  color: var(--accent-primary);
+  font-weight: 600;
+}
+
+/* 문서 클릭 시 그 문서만 다시 요약하는 동안 보여주는 로딩 표시 */
+.ai-panel__doc-summary-loading {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-6) var(--space-4);
+  color: var(--text-tertiary);
+  font-size: 0.85rem;
+}
+
+.ai-panel__doc-summary-spinner {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  border: 2px solid var(--border-default);
+  border-top-color: var(--accent-primary);
+  border-radius: 50%;
+  animation: ai-panel-doc-summary-spin 0.7s linear infinite;
+}
+
+@keyframes ai-panel-doc-summary-spin {
+  to { transform: rotate(360deg); }
+}
+
 /* 할 일 리스트 화면(ActionItemsView) — 필터 탭 */
 .action-items__tabs {
   display: flex;

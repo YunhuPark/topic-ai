@@ -7,7 +7,10 @@ import { getAllActionItems, toggleActionItemStatus, deleteActionItem } from '../
 export default function ActionItemsView() {
   const [items, setItems] = useState([]);
   const [error, setError] = useState('');
-  const [filter, setFilter] = useState('open'); // 'all' | 'open' | 'completed'
+  // 기본을 '전체'로 둔다 — '진행 중'을 기본으로 뒀더니, 체크하는 순간 그 항목이 목록에서
+  // 바로 사라져서(완료 탭으로 넘어가서) 사용자가 "체크가 됐는지 안 됐는지" 헷갈려했다.
+  // '전체'가 기본이면 체크한 항목이 같은 화면에 취소선 처리로 남아서 바로 눈에 보인다.
+  const [filter, setFilter] = useState('all'); // 'all' | 'open' | 'completed'
 
   useEffect(() => {
     getAllActionItems()
@@ -30,9 +33,9 @@ export default function ActionItemsView() {
   const openCount = items.filter((i) => i.status !== 'completed').length;
   const completedCount = items.length - openCount;
   const tabs = [
+    { id: 'all', label: '전체', count: items.length },
     { id: 'open', label: '진행 중', count: openCount },
     { id: 'completed', label: '완료', count: completedCount },
-    { id: 'all', label: '전체', count: items.length },
   ];
   const visibleItems = items.filter((i) => {
     if (filter === 'open') return i.status !== 'completed';

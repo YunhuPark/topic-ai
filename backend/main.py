@@ -28,6 +28,7 @@ from models import (
     SignupRequest, LoginRequest, AuthResponse, MeResponse,
     LinkedAccount, SearchHistoryItem, ActionItemRecord, SearchCountResponse,
     AuthorizeUrlResponse, SyncStatusItem, SyncStatusResponse, SaveActionItemRequest,
+    SummarizeDocumentRequest, Summary,
 )
 import rag_pipeline
 import db
@@ -763,11 +764,17 @@ def search_documents(
                 "actionItems": [],
             })
 
-        # 벡터 후보만으로는 못 건지는 제목 일치 문서를 구제한다 — distance=2.0(관련도 0)으로
-        # 넣어서, 순수 키워드 점수(_keyword_boost)만으로 통과 여부가 결정되게 한다.
+        # 벡터 후보만으로는 못 건지는 제목/본문 일치 문서를 구제한다. 처음엔 관련도를 0으로
+        # 줬는데(distance=2.0), 그러면 제목 일치(keyword_score 최대 1.0 → combined 0.35로
+        # 간신히 통과)만 우연히 넘어가고, 본문에만 일치하는 경우(keyword_score 최대 0.5 →
+        # combined 0.175)는 임계값을 절대 못 넘어서 이 구제 로직 자체가 사실상 죽은 코드였다
+        # (코드 리뷰로 발견) — 애초에 "승현" 검색이 됐던 건 그 Slack 문서가 벡터 후보에
+        # 이미 들어있었기 때문이지 이 구제 경로 덕분이 아니었다. 문자 그대로 일치한다는 것
+        # 자체가 이미 강한 신호이므로, 관련도를 0이 아니라 0.3(최소 기준)으로 준다.
         existing_ids = {d.metadata.get("id") for d, _ in results}
         title_matches = _title_match_candidates(vectorstore, q, existing_ids)
-        results = results + [(d, 2.0) for d in title_matches]
+        RESCUE_BASE_RELEVANCE = 0.3
+        results = results + [(d, 2 * (1 - RESCUE_BASE_RELEVANCE)) for d in title_matches]
 
         scored_results = []
         for d, distance in results:
@@ -907,3 +914,50 @@ def search_documents(
         # 실패는 실패로 알린다.
         print(f"검색 중 에러: {e}")
         raise HTTPException(status_code=500, detail="검색 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.")
+
+
+@app.post("/api/v1/summarize-document", response_model=Summary)
+def summarize_document(body: SummarizeDocumentRequest, authorization: Optional[str] = Header(None)):
+    """검색 결과에서 문서 하나를 클릭했을 때 그 문서만 다시 요약한다. 검색 시점의
+    summary.actionItems/keyPoints는 검색된 문서 전체(최대 4개)를 합친 것이라, 문서를
+    클릭해도 다른 문서 내용이 "핵심 포인트"에 섞여 나오는 문제가 있었다.
+
+    body.document의 content/source/author는 클라이언트가 보낸 값이라 그대로 믿지 않는다
+    (코드 리뷰로 발견 — 그대로 믿으면 아무 텍스트나 보내서 이 앱의 OpenAI 키로 무제한
+    요약을 돌리거나, 권한 없는 출처인 척 라벨을 붙일 수 있었다). id로 서버가 실제로 갖고
+    있는 문서를 다시 찾고, 검색과 동일하게 그 사람 본인 토큰으로 권한을 재확인한 뒤,
+    서버가 가진 원본 내용으로만 요약한다."""
+    user = _require_user(authorization)
+    vectorstore = rag_pipeline.get_vectorstore()
+    res = vectorstore._collection.get(where={"id": body.document.id}, include=["metadatas"])
+    if not res["ids"]:
+        raise HTTPException(status_code=404, detail="문서를 찾을 수 없습니다.")
+    meta = res["metadatas"][0]
+    source = meta.get("source", "notion")
+    resource = _resource_of(source, meta)
+
+    tokens = {
+        "github": db.get_linked_access_token(user["id"], "github"),
+        "gitlab": db.get_linked_access_token(user["id"], "gitlab"),
+        "slack": db.get_linked_access_token(user["id"], "slack"),
+        "notion": db.get_linked_access_token(user["id"], "notion"),
+    }
+    if source == "gdrive":
+        google_refresh_token = db.get_linked_access_token(user["id"], "google")
+        if google_refresh_token:
+            try:
+                tokens["gdrive"] = auth.refresh_google_access_token(google_refresh_token)
+            except auth.AuthError:
+                tokens["gdrive"] = None
+
+    if not resource or _check_access(source, resource, tokens) != ACCESS_ALLOWED:
+        raise HTTPException(status_code=403, detail="이 문서에 접근할 권한이 없습니다.")
+
+    doc = Document(
+        page_content=meta.get("content", ""),
+        metadata={"source": source, "author": meta.get("author", "알 수 없음")},
+    )
+    summary_dict = rag_pipeline.generate_ai_summary(body.query, [doc])
+    if summary_dict is None:
+        raise HTTPException(status_code=502, detail="AI 요약을 생성하지 못했습니다. 잠시 후 다시 시도해 주세요.")
+    return summary_dict

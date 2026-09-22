@@ -193,11 +193,19 @@ def _fetch_repo_readme(owner: str, repo: str, headers: dict) -> str:
         raise
 
 
+def _repo_overview_marker(meta: dict) -> str:
+    """저장소 개요 문서(설명+README)의 변경 감지 기준. pushed_at만 보면 설명만 바꾸고
+    코드는 안 건드린 경우(pushed_at은 그대로, updated_at만 갱신됨) 재수집을 안 해서 설명
+    변경이 다음 코드 push 때까지 반영이 안 됐다(코드 리뷰로 발견) — 둘 중 더 최근 것을 쓴다.
+    ISO8601 문자열은 형식이 고정이라 그냥 문자열 비교로도 시간 순서가 맞는다."""
+    return max(meta.get("pushed_at") or "", meta.get("updated_at") or "")
+
+
 def _repo_to_document(owner: str, repo: str, meta: dict, headers: dict) -> dict:
     readme = _fetch_repo_readme(owner, repo, headers)
     description = meta.get("description") or ""
     content = "\n\n".join(part for part in (description, readme) if part) or "(설명 및 README 없음)"
-    updated_at = meta.get("pushed_at") or meta.get("updated_at") or ""
+    updated_at = _repo_overview_marker(meta)
 
     return {
         "id": repo_document_id(owner, repo),
@@ -280,7 +288,11 @@ def _fetch_blob_text(owner: str, repo: str, sha: str, headers: dict) -> Optional
 def _file_to_document(owner: str, repo: str, item: dict, headers: dict, repo_meta: dict) -> dict:
     path = item["path"]
     name = path.rsplit("/", 1)[-1].lower()
-    content = None if name in _LOCK_FILENAMES else _fetch_blob_text(owner, repo, item["sha"], headers)
+    # git tree API가 파일 크기를 이미 알려주므로(size), 어차피 버릴 대용량 파일은
+    # blob 본문 API 호출·base64 디코드 자체를 생략한다 — 예전엔 매번 전체를 받아 디코드한
+    # 뒤에야 _MAX_FILE_BYTES로 걸렀다(불필요한 API 호출 + 큰 파일 다운로드 낭비).
+    too_big = (item.get("size") or 0) > _MAX_FILE_BYTES
+    content = None if (name in _LOCK_FILENAMES or too_big) else _fetch_blob_text(owner, repo, item["sha"], headers)
     if content is None:
         content = f"(미리보기를 지원하지 않는 파일이라 본문 내용은 없습니다 — 파일명으로만 검색됩니다: {path})"
 
@@ -319,7 +331,7 @@ def _fetch_repo_documents(
     repo_doc_id = repo_document_id(owner, repo)
     seen_ids.add(repo_doc_id)
     repo_meta = _request("GET", f"/repos/{owner}/{repo}", headers).json()
-    repo_updated_at = repo_meta.get("pushed_at") or repo_meta.get("updated_at") or ""
+    repo_updated_at = _repo_overview_marker(repo_meta)
     if not (repo_updated_at and known.get(repo_doc_id) == repo_updated_at):
         documents.append(_repo_to_document(owner, repo, repo_meta, headers))
 

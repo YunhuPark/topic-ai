@@ -194,17 +194,29 @@ def _is_vendored_path(path: str) -> bool:
 
 
 def _list_project_tree(project_id: str, headers: dict) -> list[dict]:
-    """기본 브랜치의 전체 파일 트리(파일만, blob 타입)를 가져온다."""
+    """기본 브랜치의 전체 파일 트리(파일만, blob 타입)를 가져온다.
+
+    GitHub의 git/trees?recursive=1은 한 번의 호출로 트리 전체를 주지만, GitLab의 repository
+    tree API는 페이지당(100개) API를 호출해야 한다 — 그래서 상한(GITLAB_MAX_FILES_PER_PROJECT)을
+    다 채우고 나면 나머지 페이지는 조회 자체를 멈춘다. 예전엔 상한 적용을 다 받아온 뒤에야
+    했어서, 파일이 몇만 개인 프로젝트에서 어차피 버릴 파일을 위해 수백 번 API를 호출했다."""
+    collected = []
+    page: Optional[str] = "1"
     try:
-        items = _paginate(f"/projects/{project_id}/repository/tree", {"recursive": "true"}, headers)
+        while page:
+            query = {"recursive": "true", "page": page, "per_page": 100}
+            resp = _request("GET", f"/projects/{project_id}/repository/tree", headers, params=query)
+            for item in resp.json():
+                if item.get("type") == "blob" and not _is_vendored_path(item.get("path", "")):
+                    collected.append(item)
+            if len(collected) >= GITLAB_MAX_FILES_PER_PROJECT:
+                break
+            page = resp.headers.get("X-Next-Page") or None
     except requests.HTTPError as e:
         if e.response is not None and e.response.status_code == 404:
             return []  # 커밋이 없는 빈 프로젝트
         raise
-    return [
-        item for item in items
-        if item.get("type") == "blob" and not _is_vendored_path(item.get("path", ""))
-    ]
+    return collected
 
 
 def _fetch_file_text(project_id: str, path: str, ref: str, headers: dict) -> Optional[str]:
