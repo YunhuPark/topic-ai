@@ -458,12 +458,19 @@ def get_stats(authorization: Optional[str] = Header(None)):
         freshness = compute_freshness(doc_date)
         freshness_counts[freshness] += 1
 
-        topics.append({
-            "id": m.get("id", "unknown"),
-            "label": m.get("title", "문서"),
-            "source": source,
-            "date": doc_date,
-        })
+        # "추천 주제"에는 저장소 개요/PR/Issue/일반 문서만 올린다 — GitHub/GitLab의 개별
+        # 소스 코드 파일(kind="file")은 같은 저장소 전체가 "마지막 push 날짜" 하나를 공유해서
+        # 날짜순 정렬에서 수백 개가 한꺼번에 최상단에 몰리고, ".gitignore" 같은 파일명이
+        # "추천 주제"로 뜨는 게 사용자에게 아무 의미가 없다(전체 문서 수·통계에는 그대로 집계됨,
+        # 추천 목록에서만 뺀다).
+        tags_str = m.get("tags", "") or ""
+        if "file" not in tags_str.split(","):
+            topics.append({
+                "id": m.get("id", "unknown"),
+                "label": m.get("title", "문서"),
+                "source": source,
+                "date": doc_date,
+            })
 
     topics.sort(key=lambda t: t["date"], reverse=True)
 
