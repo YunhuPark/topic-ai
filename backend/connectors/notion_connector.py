@@ -133,6 +133,62 @@ def _rich_text_to_plain(rich_text: list[dict]) -> str:
     return "".join(t.get("plain_text", "") for t in rich_text)
 
 
+def _property_value_to_text(prop: dict) -> Optional[str]:
+    """데이터베이스 행(페이지)의 속성값 하나를 사람이 읽을 텍스트로 바꾼다. title은 이미
+    문서 제목으로 따로 쓰이므로 호출부에서 건너뛴다. 실사용에서 흔한 타입 위주로만 다루고,
+    relation/formula/rollup처럼 값을 읽으려면 추가 API 호출이 필요한 타입은 범위 밖 —
+    지원하지 않는 타입은 조용히 None을 반환해 건너뛴다."""
+    ptype = prop.get("type")
+    if ptype == "rich_text":
+        return _rich_text_to_plain(prop.get("rich_text", [])) or None
+    if ptype == "number":
+        value = prop.get("number")
+        return str(value) if value is not None else None
+    if ptype in ("select", "status"):
+        value = prop.get(ptype)
+        return value.get("name") if value else None
+    if ptype == "multi_select":
+        names = [v.get("name", "") for v in prop.get("multi_select", [])]
+        return ", ".join(n for n in names if n) or None
+    if ptype == "date":
+        value = prop.get("date")
+        if not value:
+            return None
+        start = value.get("start", "")
+        end = value.get("end")
+        return f"{start} ~ {end}" if end else start
+    if ptype == "checkbox":
+        return "예" if prop.get("checkbox") else "아니오"
+    if ptype == "url":
+        return prop.get("url") or None
+    if ptype == "email":
+        return prop.get("email") or None
+    if ptype == "phone_number":
+        return prop.get("phone_number") or None
+    if ptype == "people":
+        names = [p.get("name", "") for p in prop.get("people", [])]
+        return ", ".join(n for n in names if n) or None
+    if ptype == "files":
+        names = [f.get("name", "") for f in prop.get("files", [])]
+        return ", ".join(n for n in names if n) or None
+    return None
+
+
+def _extract_property_lines(page: dict) -> list[str]:
+    """title을 제외한 나머지 속성들을 "컬럼명: 값" 줄 목록으로 만든다 — 표(데이터베이스) 행의
+    실제 컬럼 값이 검색 본문에 들어가게 하는 부분. 예전엔 데이터베이스 컨테이너 문서에 컬럼
+    "이름"만 색인되고, 각 행 문서에는 제목(title 속성)과 페이지 본문만 들어가서, "4주차"
+    같은 다른 컬럼 값으로는 검색해도 전혀 안 걸렸다."""
+    lines = []
+    for name, prop in page.get("properties", {}).items():
+        if prop.get("type") == "title":
+            continue
+        text = _property_value_to_text(prop)
+        if text:
+            lines.append(f"{name}: {text}")
+    return lines
+
+
 def _extract_database_title(db: dict) -> str:
     """페이지와 달리 데이터베이스는 title이 properties 안이 아니라 최상위에 바로 있다."""
     text = _rich_text_to_plain(db.get("title", []))
@@ -259,13 +315,18 @@ def _fetch_documents(
             title = _extract_page_title(page)
             author = _resolve_user_name((page.get("created_by") or {}).get("id"), headers)
             date = (page.get("created_time") or "")[:10]
+            # 데이터베이스 행(페이지)이면 title 외 컬럼 값들도 같이 넣는다 — 그래야 "4주차"
+            # 같은 select/date 등 컬럼 값으로도 검색된다. 일반 페이지는 properties가
+            # title 하나뿐이라 property_lines가 그냥 빈 리스트가 된다.
+            property_lines = _extract_property_lines(page)
             content_lines = _fetch_block_children_text(page_id, headers)
         except Exception as e:
             # 페이지 하나가 실패해도 나머지는 계속 수집한다. 이 페이지는 이미 seen_ids에
             # 들어가 있으므로(위에서 추가) 일시적 실패로 기존 문서가 삭제되지는 않는다.
             print(f"Notion 페이지 '{page_id}' 수집 실패, 이번 주기에는 건너뜁니다: {e}")
             continue
-        content = "\n".join(content_lines) if content_lines else "(본문 없음)"
+        all_lines = property_lines + content_lines
+        content = "\n".join(all_lines) if all_lines else "(본문 없음)"
 
         documents.append({
             "id": doc_id,

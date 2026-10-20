@@ -13,14 +13,58 @@
 .auth-gate {
   background: var(--bg-primary);
   backdrop-filter: none;
+  overflow: hidden;
+  /* position은 일부러 안 건드린다 — .auth-modal__backdrop의 position:fixed와 이 클래스가
+     같은 엘리먼트에 같이 붙는데, 여기서 position:relative를 쓰면 같은 우선순위(클래스 1개)
+     라 나중에 선언된 이 규칙이 이겨서 fixed가 깨지고, 전체 화면을 덮던 로그인 배경이 그냥
+     문서 흐름 안의 작은 블록으로 쪼그라들어 화면 왼쪽 위에 처박히는 버그가 있었다(실사용
+     중 발견). fixed도 absolute 자식의 containing block이 되므로 relative가 애초에 필요
+     없다 — 지우는 게 정답. */
+}
+
+/* 은은하게 떠다니는 그라디언트 블롭 — 로그인 화면에만 쓰는 장식이라 배경 투명도를 낮게 잡아
+   텍스트 가독성에 영향 없게 한다 */
+.auth-gate::before,
+.auth-gate::after {
+  content: '';
+  position: absolute;
+  width: 420px;
+  height: 420px;
+  border-radius: 50%;
+  filter: blur(80px);
+  opacity: 0.16;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.auth-gate::before {
+  top: -120px;
+  left: -100px;
+  background: var(--accent-gradient);
+  animation: authBlobFloat 14s ease-in-out infinite;
+}
+
+.auth-gate::after {
+  bottom: -140px;
+  right: -110px;
+  background: linear-gradient(135deg, #62aef0 0%, #0075de 100%);
+  animation: authBlobFloat 14s ease-in-out infinite reverse;
+  animation-delay: -6s;
+}
+
+@keyframes authBlobFloat {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(30px, 20px) scale(1.08); }
 }
 
 .auth-modal__card {
   position: relative;
+  z-index: 1;
   width: 100%;
   max-width: 380px;
   padding: var(--space-6);
   border-radius: var(--radius-lg);
+  animation: fadeInUp 0.5s ease-out both;
 }
 
 .auth-modal__close {
@@ -49,6 +93,10 @@
   margin-bottom: var(--space-5);
 }
 
+.auth-modal__logo {
+  animation: float 5s ease-in-out infinite;
+}
+
 .auth-modal__title {
   font-size: 1.25rem;
   font-weight: 800;
@@ -62,8 +110,39 @@
   line-height: 1.5;
 }
 
+@media (max-width: 480px) {
+  .auth-modal__backdrop {
+    padding: var(--space-3);
+  }
+
+  .auth-modal__card {
+    padding: var(--space-5);
+  }
+
+  .auth-modal__title {
+    font-size: 1.1rem;
+  }
+
+  .auth-gate::before,
+  .auth-gate::after {
+    width: 260px;
+    height: 260px;
+  }
+}
+
 @media (max-width: 420px) {
   .auth-modal__card {
     padding: var(--space-4);
+  }
+}
+
+/* 화면이 아주 좁고 낮을 때(작은 폰 가로 모드 등) 헤더 여백을 더 줄인다 */
+@media (max-height: 560px) {
+  .auth-modal__header {
+    margin-bottom: var(--space-3);
+  }
+
+  .auth-modal__logo {
+    display: none;
   }
 }

@@ -49,6 +49,20 @@
   margin-bottom: var(--space-3);
 }
 
+.ai-panel__timing-badge {
+  display: inline-flex;
+  align-items: center;
+  margin-left: var(--space-2);
+  margin-bottom: var(--space-3);
+  padding: var(--space-1) var(--space-2);
+  background: var(--bg-tertiary);
+  border-radius: var(--radius-full);
+  font-size: 0.66rem;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  cursor: default;
+}
+
 .ai-panel__header-dot {
   width: 6px;
   height: 6px;
@@ -398,15 +412,28 @@
 
 /* 할 일 삭제 버튼 — 잘못 추출된 항목을 지울 방법이 아예 없던 문제 보완 */
 .ai-panel__action-delete {
+  position: relative;
+  isolation: isolate;
   background: none;
   border: none;
-  color: var(--color-text-secondary, #9ca3af);
+  color: var(--text-tertiary);
   cursor: pointer;
   font-size: 0.85rem;
   padding: 2px 6px;
-  border-radius: var(--radius-sm, 4px);
+  border-radius: var(--radius-sm);
   opacity: 0;
-  transition: opacity 0.15s ease, background 0.15s ease;
+  transition: opacity 0.15s ease, color 0.15s ease;
+}
+
+.ai-panel__action-delete::before {
+  content: '';
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  background: rgba(239, 68, 68, 0.1);
+  transform: scale(0);
+  transition: transform var(--transition-fast);
+  z-index: -1;
 }
 
 .ai-panel__action-item:hover .ai-panel__action-delete {
@@ -414,8 +441,11 @@
 }
 
 .ai-panel__action-delete:hover {
-  background: rgba(239, 68, 68, 0.12);
   color: #ef4444;
+}
+
+.ai-panel__action-delete:hover::before {
+  transform: scale(1);
 }
 
 .ai-panel__actions-hint {
@@ -463,16 +493,23 @@
 /* 문서 클릭 시 그 문서만 다시 요약하는 동안 보여주는 로딩 표시 */
 .ai-panel__doc-summary-loading {
   display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-5) var(--space-4);
+}
+
+.ai-panel__doc-summary-loading-label {
+  display: flex;
   align-items: center;
-  gap: var(--space-3);
-  padding: var(--space-6) var(--space-4);
+  gap: var(--space-2);
+  margin-top: var(--space-2);
   color: var(--text-tertiary);
-  font-size: 0.85rem;
+  font-size: 0.8rem;
 }
 
 .ai-panel__doc-summary-spinner {
-  width: 18px;
-  height: 18px;
+  width: 14px;
+  height: 14px;
   flex-shrink: 0;
   border: 2px solid var(--border-default);
   border-top-color: var(--accent-primary);
@@ -563,6 +600,13 @@
 .action-items__checkbox--checked {
   background: var(--accent-gradient);
   border-color: transparent;
+  animation: actionCheckPop 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+@keyframes actionCheckPop {
+  0% { transform: scale(0.75); }
+  60% { transform: scale(1.18); }
+  100% { transform: scale(1); }
 }
 
 .action-items__content--done .ai-panel__action-task {

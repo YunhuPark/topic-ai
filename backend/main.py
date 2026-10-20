@@ -24,17 +24,28 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from typing import Optional
 from models import (
-    SearchResponse, StatsResponse,
+    SearchResponse, SearchTiming, StatsResponse,
     SignupRequest, LoginRequest, AuthResponse, MeResponse,
     LinkedAccount, SearchHistoryItem, ActionItemRecord, SearchCountResponse,
     AuthorizeUrlResponse, SyncStatusItem, SyncStatusResponse, SaveActionItemRequest,
-    SummarizeDocumentRequest, Summary,
+    SummarizeDocumentRequest, Summary, PersonRecord, PersonCreateRequest,
+    TeamRecord, TeamCreateRequest, TeamInviteResponse, TeamJoinRequest, TeamMemberRecord,
 )
 import rag_pipeline
+import llm_backend
 import db
 import auth
 
 db.init_db()
+
+# LLM_BACKEND=ollama로 설정했는데 Ollama 서버가 안 떠 있거나 필요한 모델이 안 받아져 있으면,
+# 검색 요청이 들어올 때 처음 500으로 알게 되는 대신 서버 기동 시점에 바로 알려준다.
+if llm_backend.is_ollama_backend():
+    _ollama_ok, _ollama_message = llm_backend.ollama_health_check()
+    if not _ollama_ok:
+        print(f"[경고] Ollama 백엔드 설정을 확인하세요 — {_ollama_message}")
+    else:
+        print(f"LLM 백엔드: ollama ({llm_backend.OLLAMA_CHAT_MODEL} / {llm_backend.OLLAMA_EMBED_MODEL})")
 
 app = FastAPI(
     title="Topic Thread AI Backend API",
@@ -57,6 +68,12 @@ SEARCH_MAX_RESULTS = 4
 # 실측한 무의미 검색어 대부분(0.22~0.3253)을 걸러내면서 진짜 검색어(0.318 이상)는 대부분
 # 살리는 보수적 절충점 — "!@#$%^&*"(0.3738)처럼 극단적 예외가 드물게 남을 수 있다.
 MIN_SEARCH_RELEVANCE = 0.35
+
+# 검색/문서 재요약 둘 다 매번 LLM을 호출해 실제 비용(OpenAI API)이 드는 동작이다 — 특히
+# 도메인 제한 없이(SIGNUP_ALLOWED_DOMAINS 비워둔) 포트폴리오/데모용으로 공개 배포하면 누구나
+# 가입해서 검색을 반복할 수 있어, 계정당 하루 호출 수를 상한선으로 막아둔다. 기본값은 데모를
+# 둘러보는 사람이 불편하지 않을 만큼 넉넉하게 잡았다 — 실제 운영 필요에 따라 .env로 조정.
+DAILY_SEARCH_LIMIT = int(os.getenv("DAILY_SEARCH_LIMIT", "50"))
 
 # 같은 로컬 서버라도 브라우저는 localhost와 127.0.0.1을 다른 origin으로 본다. 하나만 지정해두면
 # 사용자가 다른 쪽 주소로 접속했을 때 OAuth 연결에 성공하고도 프론트가 postMessage를 못 받아
@@ -158,7 +175,7 @@ def _keyword_boost(query: str, title: str, content: str, source_name: str = "") 
     return min(1.0, score / (len(tokens) * 2.0))
 
 
-def _title_match_candidates(vectorstore, query: str, exclude_ids: set[str]) -> list[Document]:
+def _title_match_candidates(vectorstore, query: str, exclude_base_ids: set[str]) -> list[Document]:
     """벡터 유사도로는 상위 후보(SEARCH_CANDIDATE_POOL)에 아예 못 드는 문서를, 제목이나 본문에
     검색어가 그대로 들어있으면 구제한다. _keyword_boost는 이미 뽑힌 후보 안에서만 재정렬하므로,
     벡터 거리가 애초에 너무 멀면(예: 스캔 악보 PDF처럼 본문 텍스트가 의미 없는 문서) 제목이
@@ -175,14 +192,19 @@ def _title_match_candidates(vectorstore, query: str, exclude_ids: set[str]) -> l
         return []
     all_docs = vectorstore._collection.get(include=["metadatas", "documents"])
     matches = []
+    seen_base_ids = set()
     for meta, content in zip(all_docs["metadatas"], all_docs["documents"]):
         doc_id = meta.get("id")
-        if not doc_id or doc_id in exclude_ids:
+        # content가 같은 문서의 모든 청크 행에 전체 원문으로 중복 저장되므로, baseId로
+        # 중복 제거하지 않으면 같은 문서의 청크 행 전부가 매번 구제 후보로 잡힌다.
+        base_id = meta.get("baseId") or doc_id
+        if not doc_id or base_id in exclude_base_ids or base_id in seen_base_ids:
             continue
         title_l = (meta.get("title") or "").lower()
         body_l = (meta.get("content") or "").lower()
         if query_lower in title_l or query_lower in body_l:
             matches.append(Document(page_content=content, metadata=meta))
+            seen_base_ids.add(base_id)
     return matches
 
 
@@ -396,60 +418,187 @@ def search_history_count(days: int = 7, authorization: Optional[str] = Header(No
     return SearchCountResponse(count=db.count_searches_since(user["id"], since_iso))
 
 
+def _require_team_access(team_id: Optional[int], user_id: int) -> None:
+    """team_id가 주어졌는데 그 팀 멤버가 아니면 403. team_id가 None(개인 스코프)이면
+    검사할 대상이 없으므로 그냥 통과."""
+    if team_id is not None and not db.is_team_member(team_id, user_id):
+        raise HTTPException(status_code=403, detail="이 팀의 멤버만 접근할 수 있습니다.")
+
+
+def _check_daily_llm_quota(user_id: int) -> None:
+    """검색/문서 재요약처럼 실제로 LLM을 호출하는 동작 직전에 호출한다. 비용이 드는 작업을
+    시작하기 전에(벡터 검색·권한 확인보다도 먼저) 막아야 한도 초과 요청이 그 작업들까지
+    낭비하지 않는다. 24시간 롤링 윈도우 — "오늘 자정" 기준보다 타임존 신경 쓸 일이 없다."""
+    since = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+    used = db.count_llm_calls_since(user_id, since)
+    if used >= DAILY_SEARCH_LIMIT:
+        raise HTTPException(
+            status_code=429,
+            detail=f"하루 검색/요약 한도({DAILY_SEARCH_LIMIT}회)를 모두 사용했습니다. 내일 다시 시도해 주세요.",
+        )
+
+
 @app.get("/api/v1/action-items", response_model=list[ActionItemRecord])
-def action_items(authorization: Optional[str] = Header(None)):
+def action_items(team_id: Optional[int] = None, authorization: Optional[str] = Header(None)):
     user = _require_user(authorization)
-    return db.get_action_items(user["id"])
+    _require_team_access(team_id, user["id"])
+    return db.get_action_items(user["id"], team_id=team_id)
 
 
 @app.post("/api/v1/action-items", response_model=list[ActionItemRecord])
 def save_action_item(body: SaveActionItemRequest, authorization: Optional[str] = Header(None)):
     """검색 결과에 후보로 뜬 할 일 중 사용자가 직접 고른 것만 저장한다(자동 저장 폐지)."""
     user = _require_user(authorization)
-    db.upsert_action_items(user["id"], body.query, [body.item.model_dump()])
-    return db.get_action_items(user["id"])
+    _require_team_access(body.team_id, user["id"])
+    db.upsert_action_items(user["id"], body.query, [body.item.model_dump()], team_id=body.team_id)
+    return db.get_action_items(user["id"], team_id=body.team_id)
 
 
 @app.patch("/api/v1/action-items/{item_id}", response_model=list[ActionItemRecord])
-def toggle_action_item(item_id: int, authorization: Optional[str] = Header(None)):
+def toggle_action_item(item_id: int, team_id: Optional[int] = None, authorization: Optional[str] = Header(None)):
     user = _require_user(authorization)
-    result = db.toggle_action_item_status(user["id"], item_id)
+    _require_team_access(team_id, user["id"])
+    result = db.toggle_action_item_status(user["id"], item_id, team_id=team_id)
     if not result:
         raise HTTPException(status_code=404, detail="할 일을 찾을 수 없습니다.")
-    return db.get_action_items(user["id"])
+    return db.get_action_items(user["id"], team_id=team_id)
 
 
 @app.delete("/api/v1/action-items/{item_id}", response_model=list[ActionItemRecord])
-def delete_action_item(item_id: int, authorization: Optional[str] = Header(None)):
+def delete_action_item(item_id: int, team_id: Optional[int] = None, authorization: Optional[str] = Header(None)):
     user = _require_user(authorization)
-    if not db.delete_action_item(user["id"], item_id):
+    _require_team_access(team_id, user["id"])
+    if not db.delete_action_item(user["id"], item_id, team_id=team_id):
         raise HTTPException(status_code=404, detail="할 일을 찾을 수 없습니다.")
-    return db.get_action_items(user["id"])
+    return db.get_action_items(user["id"], team_id=team_id)
+
+
+@app.get("/api/v1/people", response_model=list[PersonRecord])
+def people(team_id: Optional[int] = None, authorization: Optional[str] = Header(None)):
+    user = _require_user(authorization)
+    _require_team_access(team_id, user["id"])
+    return db.get_people(user["id"], team_id=team_id)
+
+
+@app.post("/api/v1/people", response_model=list[PersonRecord])
+def create_person(body: PersonCreateRequest, authorization: Optional[str] = Header(None)):
+    user = _require_user(authorization)
+    _require_team_access(body.team_id, user["id"])
+    db.create_person(user["id"], body.display_name, body.aliases, team_id=body.team_id)
+    return db.get_people(user["id"], team_id=body.team_id)
+
+
+@app.patch("/api/v1/people/{person_id}", response_model=list[PersonRecord])
+def update_person(person_id: int, body: PersonCreateRequest, authorization: Optional[str] = Header(None)):
+    user = _require_user(authorization)
+    _require_team_access(body.team_id, user["id"])
+    if not db.update_person(user["id"], person_id, body.display_name, body.aliases, team_id=body.team_id):
+        raise HTTPException(status_code=404, detail="팀원을 찾을 수 없습니다.")
+    return db.get_people(user["id"], team_id=body.team_id)
+
+
+@app.delete("/api/v1/people/{person_id}", response_model=list[PersonRecord])
+def delete_person(person_id: int, team_id: Optional[int] = None, authorization: Optional[str] = Header(None)):
+    user = _require_user(authorization)
+    _require_team_access(team_id, user["id"])
+    if not db.delete_person(user["id"], person_id, team_id=team_id):
+        raise HTTPException(status_code=404, detail="팀원을 찾을 수 없습니다.")
+    return db.get_people(user["id"], team_id=team_id)
+
+
+@app.post("/api/v1/teams", response_model=TeamRecord)
+def create_team(body: TeamCreateRequest, authorization: Optional[str] = Header(None)):
+    user = _require_user(authorization)
+    return db.create_team(user["id"], body.name)
+
+
+@app.get("/api/v1/teams", response_model=list[TeamRecord])
+def list_teams(authorization: Optional[str] = Header(None)):
+    user = _require_user(authorization)
+    return db.get_teams_for_user(user["id"])
+
+
+@app.post("/api/v1/teams/{team_id}/invites", response_model=TeamInviteResponse)
+def create_team_invite(team_id: int, authorization: Optional[str] = Header(None)):
+    user = _require_user(authorization)
+    if not db.is_team_owner(team_id, user["id"]):
+        raise HTTPException(status_code=403, detail="이 팀의 소유자만 초대 코드를 만들 수 있습니다.")
+    return db.create_team_invite(team_id, user["id"])
+
+
+@app.post("/api/v1/teams/join", response_model=TeamRecord)
+def join_team(body: TeamJoinRequest, authorization: Optional[str] = Header(None)):
+    user = _require_user(authorization)
+    team = db.get_team_by_invite_code(body.code)
+    if not team:
+        raise HTTPException(status_code=404, detail="유효하지 않은 초대 코드입니다.")
+    return db.join_team(user["id"], team["id"])
+
+
+@app.get("/api/v1/teams/{team_id}/members", response_model=list[TeamMemberRecord])
+def list_team_members(team_id: int, authorization: Optional[str] = Header(None)):
+    user = _require_user(authorization)
+    if not db.is_team_member(team_id, user["id"]):
+        raise HTTPException(status_code=403, detail="이 팀의 멤버만 조회할 수 있습니다.")
+    return db.get_team_members(team_id)
+
+
+@app.delete("/api/v1/teams/{team_id}/members/{member_user_id}", response_model=list[TeamMemberRecord])
+def remove_team_member(team_id: int, member_user_id: int, authorization: Optional[str] = Header(None)):
+    user = _require_user(authorization)
+    is_self = member_user_id == user["id"]
+    if is_self and db.is_team_owner(team_id, user["id"]):
+        # owner가 스스로 나가면 팀에 owner가 하나도 안 남을 수 있다 — 위임 기능이 없는
+        # v1에서는 이걸 막아둔다.
+        raise HTTPException(status_code=400, detail="소유자는 아직 스스로 탈퇴할 수 없습니다.")
+    if not is_self and not db.is_team_owner(team_id, user["id"]):
+        raise HTTPException(status_code=403, detail="다른 멤버를 내보낼 권한이 없습니다.")
+    if not db.remove_team_member(team_id, member_user_id):
+        raise HTTPException(status_code=404, detail="멤버를 찾을 수 없습니다.")
+    return db.get_team_members(team_id)
 
 STATS_MAX_TOPICS = 50  # 문서가 수천 개로 늘어도 대시보드 응답이 무거워지지 않도록 상한
 
 
 @app.get("/api/v1/stats", response_model=StatsResponse)
-def get_stats(authorization: Optional[str] = Header(None)):
+def get_stats(team_id: Optional[int] = None, authorization: Optional[str] = Header(None)):
     """대시보드용 통계: 인덱싱된 문서 수, 연동 소스 수, 신선도 분포, 문서(토픽) 목록.
 
     **본인이 연동해서 가져온 문서(syncedBy에 내 user_id가 있는 것)만** 집계한다 — 모든 사용자가
     Chroma 컬렉션 하나를 공유하기 때문에, 이 제한이 없으면 남의 비공개 Slack 대화·개인 Drive 파일
-    제목이 그대로 보인다(검색은 요청마다 권한을 확인하는데 통계만 그 전제를 비켜가던 문제)."""
+    제목이 그대로 보인다(검색은 요청마다 권한을 확인하는데 통계만 그 전제를 비켜가던 문제).
+
+    team_id가 있으면 "나 혼자"가 아니라 그 팀 멤버 전원이 연동한 문서를 합쳐서 집계한다 —
+    검색 결과 자체(search_documents)는 여전히 각자 실시간 토큰으로 확인하므로 이 집계와
+    무관하게 그대로다(팀 통계는 "우리 팀이 연동해둔 문서 수"일 뿐, 지금 이 문서를 실제로
+    열람할 수 있는지는 보는 사람 본인 권한에 달려 있다)."""
     user = _require_user(authorization)
+    _require_team_access(team_id, user["id"])
     vectorstore = rag_pipeline.get_vectorstore()
     data = vectorstore._collection.get(include=["metadatas"])
     metadatas = data.get("metadatas", [])
 
-    marker = f",{user['id']},"
+    if team_id is None:
+        markers = [f",{user['id']},"]
+    else:
+        markers = [f",{m['userId']}," for m in db.get_team_members(team_id)]
     source_counts: dict[str, int] = {}
     freshness_counts = {"fresh": 0, "moderate": 0, "stale": 0}
     topics = []
     total = 0
 
+    seen_base_ids = set()
     for m in metadatas:
-        if not m or marker not in (m.get("syncedBy") or ""):
+        synced_by = (m or {}).get("syncedBy") or ""
+        if not m or not any(marker in synced_by for marker in markers):
             continue
+        # baseId로 중복 제거 — 문서가 여러 청크로 쪼개져 있으면 청크 행 수가 아니라 논리
+        # 문서 수를 집계해야 한다(안 그러면 큰 파일 하나가 여러 개로 잡혀 통계가 부풀려진다).
+        base_id = m.get("baseId") or m.get("id")
+        if not base_id or base_id in seen_base_ids:
+            continue
+        seen_base_ids.add(base_id)
+
         total += 1
         source = m.get("source", "unknown")
         source_counts[source] = source_counts.get(source, 0) + 1
@@ -466,7 +615,7 @@ def get_stats(authorization: Optional[str] = Header(None)):
         tags_str = m.get("tags", "") or ""
         if "file" not in tags_str.split(","):
             topics.append({
-                "id": m.get("id", "unknown"),
+                "id": base_id,
                 "label": m.get("title", "문서"),
                 "source": source,
                 "date": doc_date,
@@ -569,13 +718,19 @@ def _check_gitlab_access(project_path: str, gitlab_access_token: str) -> str:
         return ACCESS_UNAVAILABLE
 
 
-def _check_notion_access(page_id: str, notion_access_token: str) -> str:
-    """이 Notion 계정(사용자 토큰 소유자)이 실제로 이 페이지에 접근 가능한지 직접 확인한다.
-    Public Integration은 동의 화면에서 그 사람이 고른 페이지에만 토큰이 접근 가능해서,
-    Drive/GitHub/GitLab과 동일하게 본인 토큰으로 건별 GET하는 패턴이 그대로 맞는다."""
+def _check_notion_access(resource_id: str, notion_access_token: str) -> str:
+    """이 Notion 계정(사용자 토큰 소유자)이 실제로 이 페이지/데이터베이스에 접근 가능한지
+    직접 확인한다. Public Integration은 동의 화면에서 그 사람이 고른 페이지에만 토큰이
+    접근 가능해서, Drive/GitHub/GitLab과 동일하게 본인 토큰으로 건별 GET하는 패턴이 그대로
+    맞는다. 데이터베이스 컨테이너는 _resource_of가 "db:{database_id}" 형태로 넘겨준다 —
+    Notion API에서 페이지와 데이터베이스는 별개 엔드포인트라 여기서 구분해서 호출해야 한다."""
+    if resource_id.startswith("db:"):
+        url = f"https://api.notion.com/v1/databases/{resource_id[len('db:'):]}"
+    else:
+        url = f"https://api.notion.com/v1/pages/{resource_id}"
     try:
         resp = http_requests.get(
-            f"https://api.notion.com/v1/pages/{page_id}",
+            url,
             headers={"Authorization": f"Bearer {notion_access_token}", "Notion-Version": "2022-06-28"},
             timeout=10,
         )
@@ -620,7 +775,10 @@ def _check_slack_access(channel_id: str, slack_user_token: str) -> str:
 def _resource_of(source: str, metadata: dict) -> Optional[str]:
     """문서 메타데이터에서 "권한을 확인할 대상"(저장소/프로젝트/채널/파일/페이지)을 뽑아낸다.
     여러 문서가 같은 저장소·채널을 공유하므로, 이 단위로 묶어야 확인 횟수를 크게 줄일 수 있다."""
-    doc_id = metadata.get("id", "") or ""
+    # baseId 우선 — 문서가 여러 청크로 쪼개져 있으면 id에 "::chunk-N" 접미사가 붙는데,
+    # gdrive/notion처럼 id를 접두사만 잘라 리소스 키로 쓰는 소스는 그 접미사가 그대로
+    # 남아 리소스 키가 오염된다(권한 캐시 키/실제 API 조회 모두 깨짐).
+    doc_id = metadata.get("baseId") or metadata.get("id", "") or ""
     tags = (metadata.get("tags", "") or "").split(",")
 
     if source == "gdrive":
@@ -633,6 +791,13 @@ def _resource_of(source: str, metadata: dict) -> Optional[str]:
         remainder = doc_id[len("slack-"):] if doc_id.startswith("slack-") else ""
         return remainder.split("-")[0] if remainder else None
     if source == "notion":
+        # 데이터베이스 컨테이너 문서는 id가 "notion-db-{database_id}" 형식(더 구체적인
+        # 접두사이므로 먼저 검사)이라, 일반 페이지("notion-{page_id}")와 구분해서 뽑아내야
+        # 한다 — 안 그러면 "db-"까지 리소스 id에 섞여 들어가 권한 확인이 항상 실패한다.
+        # Notion API에서 페이지와 데이터베이스는 별개 엔드포인트라 _check_notion_access가
+        # 구분할 수 있게 "db:" 접두사를 붙여 반환한다.
+        if doc_id.startswith("notion-db-"):
+            return f"db:{doc_id[len('notion-db-'):]}"
         # id 형식 "notion-{page_id}" — page_id 자체가 대시 포함 UUID라 접두사만 잘라내면 된다
         return doc_id[len("notion-"):] if doc_id.startswith("notion-") else None
     return None
@@ -712,6 +877,7 @@ def _resolve_permissions(user_id: int, resources: set[tuple], tokens: dict) -> d
 @app.get("/api/v1/search", response_model=SearchResponse)
 def search_documents(
     q: str = Query(..., description="검색 쿼리"),
+    team_id: Optional[int] = None,
     authorization: Optional[str] = Header(None),
 ):
     """
@@ -737,6 +903,8 @@ def search_documents(
     user = auth.get_current_user(authorization)
     if not user:
         raise HTTPException(status_code=401, detail="로그인이 필요합니다.")
+    _require_team_access(team_id, user["id"])
+    _check_daily_llm_quota(user["id"])
 
     tokens = {
         "github": db.get_linked_access_token(user["id"], "github"),
@@ -747,6 +915,10 @@ def search_documents(
     google_refresh_token = db.get_linked_access_token(user["id"], "google")
 
     db.record_search(user["id"], q)
+
+    # 응답 속도 실측 — 벡터 검색/재정렬, 소스별 실시간 권한 확인, LLM 요약 세 단계가
+    # 전체 지연의 대부분을 차지해서 각각 따로 잰다(어디가 병목인지 구분하기 위함).
+    t_start = time.time()
 
     # 1. RAG Vector DB에서 가장 관련성 높은 문서 검색
     try:
@@ -786,7 +958,7 @@ def search_documents(
         # 겨우 넘기는 최소값"(0.27)으로 낮추면, 진짜 벡터 유사도가 조금이라도 있는 문서가
         # 순수 구제 문서보다 항상 앞서게 된다 — 구제는 "0점을 최소 통과선까지만" 끌어올리는
         # 역할이지, 진짜 유사도보다 우대돼서는 안 된다.
-        existing_ids = {d.metadata.get("id") for d, _ in results}
+        existing_ids = {(d.metadata.get("baseId") or d.metadata.get("id")) for d, _ in results}
         title_matches = _title_match_candidates(vectorstore, q, existing_ids)
         RESCUE_BASE_RELEVANCE = 0.27
         results = results + [(d, 2 * (1 - RESCUE_BASE_RELEVANCE)) for d in title_matches]
@@ -803,6 +975,21 @@ def search_documents(
             scored_results.append((combined_score, relevance, d))
         scored_results.sort(key=lambda item: item[0], reverse=True)
 
+        # 문서가 여러 청크로 쪼개져 있으면 같은 baseId를 가진 여러 청크 행이 각각 독립적인
+        # 후보로 들어올 수 있다 — combined_score 내림차순 정렬 직후라, baseId별로 1등(최고점)
+        # 청크만 남기면 나머지 파이프라인(권한 확인·결과 조립)은 기존과 동일하게 동작한다.
+        def _dedup_by_base_id(scored):
+            seen, deduped = set(), []
+            for item in scored:
+                base_id = item[2].metadata.get("baseId") or item[2].metadata.get("id")
+                if base_id in seen:
+                    continue
+                seen.add(base_id)
+                deduped.append(item)
+            return deduped
+
+        scored_results = _dedup_by_base_id(scored_results)
+
         # 관련도 자체가 너무 낮은 후보는 권한 확인·순위 대상에서 아예 제외한다 — 안 그러면
         # 색인된 문서 어디에도 안 맞는 검색어("xyz123" 등)도 "그나마 덜 먼" 문서 4개를 억지로
         # 보여주게 된다.
@@ -815,6 +1002,8 @@ def search_documents(
         # 결과에 대해서는 그대로 유지하면서, "검색어가 제목/출처명에 그대로 들어간" 경우만
         # 구제한다.
         relevant_results = [r for r in scored_results if max(r[0], r[1]) >= MIN_SEARCH_RELEVANCE]
+
+        t_retrieval = time.time()
 
         # 후보들이 참조하는 "권한 확인 대상"을 먼저 모아서 중복을 없앤다 — 같은 저장소·채널의
         # 문서가 여러 개 걸리는 게 보통이라, 이것만으로도 실제 확인 횟수가 크게 준다.
@@ -836,6 +1025,16 @@ def search_documents(
         disconnected = sorted({s for (s, _), v in permissions.items() if v == ACCESS_AUTH_FAILED})
         degraded = sorted({s for (s, _), v in permissions.items() if v == ACCESS_UNAVAILABLE})
 
+        t_permission = time.time()
+
+        def _build_timing(llm_end: float) -> SearchTiming:
+            return SearchTiming(
+                retrievalMs=int((t_retrieval - t_start) * 1000),
+                permissionCheckMs=int((t_permission - t_retrieval) * 1000),
+                llmSummaryMs=int((llm_end - t_permission) * 1000),
+                totalMs=int((llm_end - t_start) * 1000),
+            )
+
         # 프론트엔드 포맷(List[dict])에 맞게 변환 (권한 없는 문서는 여기서 제외)
         formatted_docs = []
         visible_docs = []
@@ -851,9 +1050,18 @@ def search_documents(
             content = d.metadata.get("content", d.page_content)
             doc_date = d.metadata.get("date", "2026-09-01")
             tags_str = d.metadata.get("tags", "")
-            visible_docs.append(d)
+            # d.page_content는 이 문서가 청킹됐다면 이긴 청크 하나의 슬라이스일 뿐이다 —
+            # AI 요약이 문서 전체가 아니라 그 조각만 보는 회귀를 막기 위해, 항상 전체 원문인
+            # content로 page_content를 다시 만들어 넣는다.
+            visible_docs.append(Document(
+                page_content=f"Title: {d.metadata.get('title', '')}\n\nContent:\n{content}",
+                metadata=d.metadata,
+            ))
             formatted_docs.append({
-                "id": d.metadata.get("id", "unknown"),
+                # baseId 우선 — 프론트가 항상 청크 접미사 없는 안정적인 id를 받게 한다
+                # (summarize-document는 어느 청크 id로 조회해도 content가 전체 원문으로 동일해
+                # 안전하다).
+                "id": d.metadata.get("baseId") or d.metadata.get("id", "unknown"),
                 "title": d.metadata.get("title", "문서"),
                 "source": source,
                 "author": d.metadata.get("author", "알 수 없음"),
@@ -890,10 +1098,16 @@ def search_documents(
                 },
                 disconnectedSources=disconnected,
                 degradedSources=degraded,
+                timing=_build_timing(time.time()),
             )
 
         # 2. LLM을 통한 요약 및 액션 아이템 추출
-        summary_dict = rag_pipeline.generate_ai_summary(q, visible_docs)
+        known_people = db.get_people(user["id"], team_id=team_id)
+        workspace_authors = db.get_workspace_authors(team_id=team_id)
+        summary_dict = rag_pipeline.generate_ai_summary(
+            q, visible_docs, known_people=known_people, workspace_authors=workspace_authors
+        )
+        t_llm = time.time()
 
         if summary_dict is None:
             # 요약만 실패한 경우 — 찾은 문서는 그대로 보여주되, 가짜 요약으로 채우지 않는다.
@@ -908,6 +1122,7 @@ def search_documents(
                 },
                 disconnectedSources=disconnected,
                 degradedSources=degraded,
+                timing=_build_timing(t_llm),
             )
 
         # 예전엔 검색할 때마다 추출된 할 일을 전부 자동 저장했는데, 그 결과 테스트 삼아 돌린
@@ -915,11 +1130,18 @@ def search_documents(
         # 후보로만 보여주고(summary.actionItems), 사용자가 직접 고른 것만
         # POST /api/v1/action-items로 저장한다.
 
+        timing = _build_timing(t_llm)
+        print(
+            f"검색 응답 시간 — 검색 {timing.retrievalMs}ms / 권한확인 {timing.permissionCheckMs}ms "
+            f"/ LLM요약 {timing.llmSummaryMs}ms / 총 {timing.totalMs}ms"
+        )
+
         return SearchResponse(
             documents=formatted_docs,
             summary=summary_dict,
             disconnectedSources=disconnected,
             degradedSources=degraded,
+            timing=timing,
         )
 
     except HTTPException:
@@ -943,6 +1165,12 @@ def summarize_document(body: SummarizeDocumentRequest, authorization: Optional[s
     있는 문서를 다시 찾고, 검색과 동일하게 그 사람 본인 토큰으로 권한을 재확인한 뒤,
     서버가 가진 원본 내용으로만 요약한다."""
     user = _require_user(authorization)
+    _require_team_access(body.team_id, user["id"])
+    _check_daily_llm_quota(user["id"])
+    # search_documents의 db.record_search와 같은 카운터(search_history)를 공유한다 — 안 그러면
+    # 문서 재요약만 반복 호출해서 위 하루 한도를 우회할 수 있다(검색 없이도 LLM이 호출되는 유일한
+    # 다른 경로). kind='resummarize'라 "최근 검색" UI에는 안 뜨고 한도 계산에만 들어간다.
+    db.record_search(user["id"], body.query, kind="resummarize")
     vectorstore = rag_pipeline.get_vectorstore()
     res = vectorstore._collection.get(where={"id": body.document.id}, include=["metadatas"])
     if not res["ids"]:
@@ -972,7 +1200,11 @@ def summarize_document(body: SummarizeDocumentRequest, authorization: Optional[s
         page_content=meta.get("content", ""),
         metadata={"source": source, "author": meta.get("author", "알 수 없음")},
     )
-    summary_dict = rag_pipeline.generate_ai_summary(body.query, [doc])
+    known_people = db.get_people(user["id"], team_id=body.team_id)
+    workspace_authors = db.get_workspace_authors(team_id=body.team_id)
+    summary_dict = rag_pipeline.generate_ai_summary(
+        body.query, [doc], known_people=known_people, workspace_authors=workspace_authors
+    )
     if summary_dict is None:
         raise HTTPException(status_code=502, detail="AI 요약을 생성하지 못했습니다. 잠시 후 다시 시도해 주세요.")
     return summary_dict

@@ -1,0 +1,176 @@
+.people-manager {
+  padding: var(--space-2) var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.people-manager__hint {
+  font-size: 0.66rem;
+  color: var(--text-tertiary);
+  margin: 0;
+  line-height: 1.4;
+}
+
+.people-manager__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.people-manager__item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-2);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2);
+  transition: border-color var(--transition-fast), background var(--transition-fast);
+}
+
+.people-manager__item:hover {
+  border-color: var(--border-hover);
+  background: var(--bg-elevated);
+}
+
+.people-manager__item-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.people-manager__item-name {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.people-manager__item-aliases {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.people-manager__alias-chip {
+  font-size: 0.64rem;
+  color: var(--text-tertiary);
+  background: var(--bg-secondary);
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+
+/* uiverse.io의 원형 모프 버튼에서 가져온 "hover 시 은은한 원형 링이 커지며 나타나는" 느낌을
+   단순화해서 적용 — ::before를 0에서 확대시키는 방식이라 배경색 자체를 즉시 바꾸는 것보다
+   부드럽다. */
+.people-manager__delete {
+  position: relative;
+  isolation: isolate;
+  background: none;
+  border: none;
+  color: var(--text-tertiary);
+  font-size: 0.95rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: var(--radius-full);
+  transition: color var(--transition-fast);
+}
+
+.people-manager__delete::before {
+  content: '';
+  position: absolute;
+  inset: -4px;
+  border-radius: 50%;
+  background: rgba(239, 68, 68, 0.1);
+  transform: scale(0);
+  transition: transform var(--transition-fast);
+  z-index: -1;
+}
+
+.people-manager__delete:hover:not(:disabled) {
+  color: #ef4444;
+}
+
+.people-manager__delete:hover:not(:disabled)::before {
+  transform: scale(1);
+}
+
+.people-manager__delete:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.people-manager__form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin-top: var(--space-1);
+}
+
+.people-manager__input {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-default);
+  color: var(--text-primary);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2);
+  font-size: 0.72rem;
+  font-family: var(--font-sans);
+}
+
+.people-manager__input:focus {
+  outline: none;
+  border-color: var(--accent-primary);
+}
+
+/* select 태그는 border/background는 이 클래스를 그대로 따르지만, 브라우저 기본 드롭다운
+   화살표는 안 지워지고 그대로 남아있어서 커스텀 화살표와 안 어울렸다 — appearance:none으로
+   기본 화살표를 없애고 우리 색상에 맞춘 얇은 셰브런 아이콘으로 교체. */
+select.people-manager__input {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: calc(var(--space-2) + 20px);
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23a39e98' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right var(--space-2) center;
+  background-size: 14px;
+  cursor: pointer;
+}
+
+.people-manager__button {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-default);
+  color: var(--text-secondary);
+  border-radius: var(--radius-md);
+  padding: var(--space-2);
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color var(--transition-fast), color var(--transition-fast),
+    transform var(--transition-fast), box-shadow var(--transition-fast), background var(--transition-fast);
+}
+
+.people-manager__button:hover:not(:disabled) {
+  border-color: var(--accent-primary);
+  color: var(--text-primary);
+  background: var(--bg-secondary);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-sm);
+}
+
+.people-manager__button:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.people-manager__button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.people-manager__error {
+  font-size: 0.68rem;
+  color: var(--danger);
+  margin: 0;
+}

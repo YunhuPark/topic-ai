@@ -19,6 +19,11 @@
 .sidebar--collapsed {
   width: 72px;
   align-items: center;
+  /* 접힌 상태는 로고/메뉴 3개/유저 영역뿐이라 세로로 넘칠 일이 없다(아코디언들은 접힌
+     상태에선 아예 렌더링 안 함) — overflow를 visible로 풀어야 아래 네비게이션 hover
+     말풍선이 사이드바 오른쪽 바깥으로 안 잘리고 나온다(overflow-y:auto가 남아있으면
+     CSS 스펙상 overflow-x:visible도 무시되고 같이 잘린다). */
+  overflow: visible;
 }
 
 /* 접힌 상태에서는 라벨 텍스트가 없어져서 아이콘만 남는데, 기본 레이아웃(justify-content: flex-start)
@@ -30,6 +35,38 @@
   padding-left: 0;
   padding-right: 0;
   width: 44px;
+}
+
+/* 접힌 상태의 네비게이션 라벨 — 평소엔 숨겨두고(DOM엔 있음), hover하면 아이콘 오른쪽으로
+   말풍선처럼 슬라이드 인 되며 나타난다(uiverse.io의 가로 확장 pill 네비게이션에서 가져온
+   인터랙션). */
+.sidebar--collapsed .sidebar__nav-item {
+  position: relative;
+}
+
+.sidebar--collapsed .sidebar__nav-label-text {
+  position: absolute;
+  left: calc(100% + var(--space-2));
+  top: 50%;
+  transform: translateY(-50%) translateX(-6px);
+  padding: var(--space-2) var(--space-3);
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  font-size: 0.8rem;
+  font-weight: 600;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--transition-fast), transform var(--transition-fast);
+  z-index: var(--z-dropdown);
+}
+
+.sidebar--collapsed .sidebar__nav-item:hover .sidebar__nav-label-text {
+  opacity: 1;
+  transform: translateY(-50%) translateX(0);
 }
 
 /* Logo */
@@ -83,6 +120,18 @@
   gap: var(--space-1);
 }
 
+/* 접혔을 때 "연동 관리"/"팀원 관리"/"내 팀"을 대신하는 아이콘 3개 — 메인 메뉴(.sidebar__nav)와
+   달리 flex:1을 안 줘서 세로 공간을 나눠 가지려 하지 않는다(안 그러면 메인 메뉴랑 공간을
+   반씩 나눠 먹어서 레이아웃이 이상해짐). 위쪽에 구분선만 살짝. */
+.sidebar__collapsed-shortcuts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding-top: var(--space-3);
+  margin-top: var(--space-2);
+  border-top: 1px solid var(--border-subtle);
+}
+
 .sidebar__nav-label {
   font-size: 0.65rem;
   font-weight: 700;
@@ -127,6 +176,14 @@
   font-size: 1.15rem;
   width: 24px;
   text-align: center;
+  transition: transform var(--transition-fast);
+}
+
+/* hover/active일 때 아이콘이 살짝 커지는 효과 — uiverse.io의 아이콘 도크 컴포넌트에서
+   가져온 인터랙션(아이콘 확대 + 강조색)을 이 사이드바 네비게이션에 맞게 적용 */
+.sidebar__nav-item:hover .sidebar__nav-icon,
+.sidebar__nav-item--active .sidebar__nav-icon {
+  transform: scale(1.15);
 }
 
 .sidebar__nav-label-text {
@@ -226,7 +283,17 @@
 
 .sidebar__accounts-count {
   color: var(--text-tertiary);
-  font-weight: 500;
+  font-weight: 700;
+  font-size: 0.65rem;
+  background: var(--bg-primary);
+  padding: 1px 7px;
+  border-radius: var(--radius-full);
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.sidebar__accounts-count--complete {
+  background: var(--success-bg);
+  color: var(--success);
 }
 
 .sidebar__accounts-chevron {
@@ -243,5 +310,194 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+/* 펼침/접힘 애니메이션 — "연동 관리"/"팀원 관리" 둘 다 공유. 예전엔 조건부 렌더링으로
+   내용이 그냥 뿅 나타나고 사라져서 딱딱하게 느껴졌다. 높이를 애니메이션할 대상 콘텐츠가
+   가변 길이라 max-height를 큰 고정값으로 잡는 방식 대신, grid-template-rows를 0fr→1fr로
+   트랜지션하는 방식(오토 높이도 부드럽게 애니메이션되는 최신 CSS 트릭)을 쓴다. */
+.sidebar__collapse {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows var(--transition-slow);
+}
+
+.sidebar__collapse--open {
+  grid-template-rows: 1fr;
+}
+
+.sidebar__collapse-inner {
+  overflow: hidden;
+  min-height: 0;
+  opacity: 0;
+  transition: opacity var(--transition-fast);
+}
+
+.sidebar__collapse--open .sidebar__collapse-inner {
+  opacity: 1;
+  transition: opacity var(--transition-slow) 100ms;
+}
+
+/* "연동 관리"는 소스 5개가 쌓여서 "팀원 관리"보다 펼쳐지는 높이가 훨씬 크다 — 같은
+   지속시간(--transition-slow)을 쓰면 더 먼 거리를 움직이는 만큼 체감 속도가 더 빨라 보인다.
+   두 아코디언의 체감 속도를 맞추려고 이쪽만 지속시간을 늘렸다. */
+.sidebar__collapse--tall {
+  transition-duration: 650ms;
+}
+
+.sidebar__collapse--tall .sidebar__collapse-inner {
+  transition-duration: 650ms;
+}
+
+/* 팀원 관리 — 계정 연동과 동일한 접고 펼치는 구조 */
+.sidebar__people {
+  margin-top: var(--space-1);
+}
+
+.sidebar__people-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  background: none;
+  border: none;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-sans);
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+
+.sidebar__people-toggle:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.sidebar__people-count {
+  color: var(--text-tertiary);
+  font-weight: 700;
+  font-size: 0.65rem;
+  background: var(--bg-primary);
+  padding: 1px 7px;
+  border-radius: var(--radius-full);
+}
+
+.sidebar__people-chevron {
+  margin-left: auto;
+  display: inline-block;
+  transition: transform var(--transition-fast);
+}
+
+.sidebar__people-chevron--open {
+  transform: rotate(90deg);
+}
+
+.sidebar__mobile-toggle {
+  display: none; /* 넓은 화면에서는 숨김 — 아래 미디어쿼리에서 좁은 화면일 때만 보이게 함 */
+}
+
+.sidebar__mobile-backdrop {
+  display: none;
+}
+
+/* ===== 좁은 화면(폰) — 사이드바를 항상 켜두면 본문을 다 가리므로, 평소엔 화면 밖으로
+   숨겨두고 햄버거 버튼으로 여는 오버레이 드로어로 전환한다 ===== */
+@media (max-width: 720px) {
+  .sidebar {
+    width: 260px;
+    transform: translateX(-100%);
+    transition: transform var(--transition-normal);
+    box-shadow: none;
+  }
+
+  /* 접기(collapsed) 상태는 넓은 화면 전용 기능 — 모바일에서는 항상 전체 폭 드로어로만 동작 */
+  .sidebar--collapsed {
+    width: 260px;
+    align-items: stretch;
+  }
+  .sidebar--collapsed .sidebar__logo,
+  .sidebar--collapsed .sidebar__nav-item,
+  .sidebar--collapsed .sidebar__user {
+    justify-content: flex-start;
+    padding-left: var(--space-3);
+    padding-right: var(--space-3);
+    width: auto;
+  }
+
+  .sidebar--mobile-open {
+    transform: translateX(0);
+    box-shadow: var(--shadow-lg);
+  }
+
+  .sidebar__mobile-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: fixed;
+    top: var(--space-3);
+    left: var(--space-3);
+    width: 40px;
+    height: 40px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-md);
+    cursor: pointer;
+    z-index: calc(var(--z-sticky) + 2);
+  }
+
+  /* 햄버거 3줄 ↔ X자 전환 애니메이션 */
+  .sidebar__mobile-toggle-icon,
+  .sidebar__mobile-toggle-icon::before,
+  .sidebar__mobile-toggle-icon::after {
+    display: block;
+    position: absolute;
+    width: 18px;
+    height: 2px;
+    background: var(--text-primary);
+    border-radius: var(--radius-full);
+    transition: transform var(--transition-fast), opacity var(--transition-fast), top var(--transition-fast);
+  }
+  .sidebar__mobile-toggle-icon {
+    top: 50%;
+    transform: translateY(-50%);
+  }
+  .sidebar__mobile-toggle-icon::before {
+    content: '';
+    top: -6px;
+    left: 0;
+  }
+  .sidebar__mobile-toggle-icon::after {
+    content: '';
+    top: 6px;
+    left: 0;
+  }
+  .sidebar__mobile-toggle-icon--open {
+    background: transparent;
+  }
+  .sidebar__mobile-toggle-icon--open::before {
+    top: 0;
+    transform: rotate(45deg);
+  }
+  .sidebar__mobile-toggle-icon--open::after {
+    top: 0;
+    transform: rotate(-45deg);
+  }
+
+  .sidebar__mobile-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(5, 6, 10, 0.45);
+    z-index: calc(var(--z-sticky) + 1);
+    animation: fadeIn var(--transition-normal) ease-out both;
+  }
+}
+
+.sidebar__people-panel {
   margin-top: var(--space-2);
 }

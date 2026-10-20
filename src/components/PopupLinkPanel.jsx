@@ -14,7 +14,7 @@ const TRUSTED_CALLBACK_ORIGINS = [new URL(API_BASE).origin, 'http://127.0.0.1:80
 const SYNC_POLL_TIMEOUT_MS = 120_000;
 const SYNC_POLL_INTERVAL_MS = 2_000;
 
-export default function PopupLinkPanel({ provider, displayName, icon, linkedLogin, onLinked, onUnlinked }) {
+export default function PopupLinkPanel({ provider, displayName, icon, linkedLogin, onLinked, onUnlinked, note }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [justLinked, setJustLinked] = useState(false);
@@ -128,11 +128,15 @@ export default function PopupLinkPanel({ provider, displayName, icon, linkedLogi
     <div className="google-link">
       {linkedLogin && (
         <div className="google-link__status-row">
-          <span className="google-link__status">🟢 {displayName} 연결됨</span>
+          <span className="google-link__status">
+            <span className="google-link__status-dot" />
+            {displayName} 연결됨
+          </span>
           <span className="google-link__email">{linkedLogin}</span>
         </div>
       )}
       <button className="google-link__button" onClick={handleClick} disabled={loading || unlinking}>
+        {loading && <span className="google-link__button-spinner" />}
         {loading ? '연결 중...' : linkedLogin ? `🔄 ${displayName} 다시 연결` : `${icon} ${displayName} 연결`}
       </button>
       {linkedLogin && (
@@ -144,6 +148,9 @@ export default function PopupLinkPanel({ provider, displayName, icon, linkedLogi
           {unlinking ? '해제 중...' : '연동 해제'}
         </button>
       )}
+      {/* 연동 전후 상관없이 항상 보여야 하는 소스별 고정 안내(예: Notion의 개별 공유 필요
+          안내) — 동기화 진행 상황 안내와 달리 justLinked 상태에 묶이지 않는다. */}
+      {note && <p className="google-link__hint">{note}</p>}
       {justLinked && syncInfo?.status === 'done' && (
         <p className="google-link__hint">
           ✅ 동기화 완료 — {syncInfo.lastCount > 0 ? `새 문서 ${syncInfo.lastCount}개를 가져왔어요.` : '가져온 문서 중 바뀐 내용은 없었어요.'}

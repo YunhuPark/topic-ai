@@ -123,6 +123,12 @@
   cursor: pointer;
   position: relative;
   overflow: hidden;
+  transition: transform var(--transition-fast), box-shadow var(--transition-fast),
+    background var(--transition-normal), border-color var(--transition-normal);
+}
+
+.doc-card:hover {
+  transform: translateY(-2px);
 }
 
 .doc-card--selected {
@@ -255,6 +261,6 @@
 .topic-thread__empty {
   padding: var(--space-6) var(--space-4);
   text-align: center;
-  color: var(--color-text-secondary, #6b7280);
+  color: var(--text-secondary);
   font-size: 0.9rem;
 }

@@ -75,6 +75,18 @@
   padding: var(--space-5);
 }
 
+/* 사이드바를 로고 클릭으로 수동 접었을 때(모바일 드로어와 무관하게, 넓은 화면에서도) 본문
+   여백이 260px로 그대로 남아있어서 사이드바 옆에 거대한 빈 공간이 생기던 버그 — collapsed
+   상태가 Sidebar 내부 로컬 state라 App.jsx로 안 올라오는데, :has()로 형제 엘리먼트의 클래스를
+   보고 본문 여백을 직접 맞춘다(상태를 끌어올리는 리팩터 없이 CSS만으로 해결). 모바일
+   드로어 구간(720px 이하)에서는 이 규칙이 아예 적용되지 않게 min-width로 범위를 나눈다 —
+   안 그러면 이 규칙의 특이도가 더 높아서 모바일의 margin-left:0을 덮어써버린다. */
+@media (min-width: 721px) {
+  .app:has(.sidebar--collapsed) .app__main {
+    margin-left: 72px;
+  }
+}
+
 /* Responsive */
 @media (max-width: 1200px) {
   .app__results {
@@ -95,5 +107,23 @@
 
   .app__search-header {
     padding: 0 0 var(--space-4);
+  }
+}
+
+/* Sidebar.css의 모바일 드로어 전환 지점(720px)과 맞춤 — 이 폭 아래에서는 사이드바가
+   화면을 밀어내는 게 아니라 그 위를 덮는 오버레이라, 본문이 더 이상 자리를 비켜줄
+   필요가 없다. 대신 왼쪽 위 고정 햄버거 버튼과 안 겹치게 위쪽 여백만 살짝 준다. */
+@media (max-width: 720px) {
+  .app__main {
+    margin-left: 0;
+    padding: var(--space-4);
+    padding-top: calc(40px + var(--space-3) + var(--space-3));
+  }
+}
+
+@media (max-width: 480px) {
+  .app__main {
+    padding: var(--space-3);
+    padding-top: calc(40px + var(--space-3) + var(--space-3));
   }
 }

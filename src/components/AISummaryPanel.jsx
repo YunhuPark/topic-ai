@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import './AISummaryPanel.css';
 import { getSourceMeta } from '../data/mockData';
 import { saveActionItem } from '../utils/actionItemsStore';
@@ -32,7 +32,7 @@ function TypingEffect({ text, speed = 15 }) {
   );
 }
 
-export default function AISummaryPanel({ summary, selectedDoc, searchQuery }) {
+export default function AISummaryPanel({ summary, selectedDoc, searchQuery, teamId, searchTiming }) {
   const [activeSection, setActiveSection] = useState('summary');
   // 검색 결과의 할 일 후보 중 이번 화면에서 이미 저장 누른 것 — 검색어가 바뀌면(새 검색) 초기화.
   // 전체 요약과 문서별 요약이 둘 다 액션아이템 id를 "1","2"...로 새로 매기므로, 저장 여부는
@@ -42,13 +42,17 @@ export default function AISummaryPanel({ summary, selectedDoc, searchQuery }) {
   const [docSummary, setDocSummary] = useState(null);
   const [docSummaryError, setDocSummaryError] = useState('');
   const [docSummaryLoading, setDocSummaryLoading] = useState(false);
+  // 문서 하나를 한 번 요약하면 (검색어, 문서 id) 조합으로 캐싱해둔다 — 예전엔 다른 문서를
+  // 클릭했다가 이미 요약했던 문서로 돌아와도 매번 새로 로딩했다. 리렌더에 영향받지 않아야
+  // 해서 state가 아니라 ref에 둔다.
+  const docSummaryCache = useRef(new Map());
 
   // summary는 검색어가 똑같아도(같은 "최근 검색" 항목을 다시 클릭 등) 매번 새로 만들어진
   // 객체라, 검색어 문자열만 보면 "완전히 똑같은 검색을 다시 돌렸을 때" 이전 저장 상태가
   // 안 지워지는 문제가 있었다 — summary 자체를 의존성에 넣어 매 검색마다 확실히 초기화한다.
   useEffect(() => {
     setSavedIds(new Set());
-  }, [searchQuery, summary]);
+  }, [searchQuery, summary, teamId]);
 
   // 문서를 클릭하면 그 문서 하나만 다시 요약한다 — 예전엔 검색 결과 전체(최대 4개)를 합친
   // 요약을 계속 보여줘서, 다른 문서를 클릭해도 무관한 문서 내용이 "핵심 포인트"에 섞여
@@ -59,16 +63,31 @@ export default function AISummaryPanel({ summary, selectedDoc, searchQuery }) {
       setDocSummaryError('');
       return undefined;
     }
+
+    const cacheKey = `${teamId ?? 'personal'}::${searchQuery}::${selectedDoc.id}`;
+    const cached = docSummaryCache.current.get(cacheKey);
+    if (cached) {
+      // 이미 이 검색어+문서 조합으로 요약해둔 적 있음 — 로딩 스피너 없이 바로 보여준다.
+      setDocSummary(cached);
+      setDocSummaryError('');
+      setDocSummaryLoading(false);
+      return undefined;
+    }
+
     let cancelled = false;
     setDocSummary(null);
     setDocSummaryError('');
     setDocSummaryLoading(true);
-    summarizeDocument(searchQuery, selectedDoc)
-      .then((s) => { if (!cancelled) setDocSummary(s); })
+    summarizeDocument(searchQuery, selectedDoc, teamId)
+      .then((s) => {
+        if (cancelled) return;
+        docSummaryCache.current.set(cacheKey, s);
+        setDocSummary(s);
+      })
       .catch(() => { if (!cancelled) setDocSummaryError('이 문서 요약을 불러오지 못했습니다.'); })
       .finally(() => { if (!cancelled) setDocSummaryLoading(false); });
     return () => { cancelled = true; };
-  }, [selectedDoc, searchQuery]);
+  }, [selectedDoc, searchQuery, teamId]);
 
   const keyFor = (item) => `${selectedDoc ? selectedDoc.id : 'agg'}-${item.id}`;
 
@@ -80,7 +99,7 @@ export default function AISummaryPanel({ summary, selectedDoc, searchQuery }) {
       // 전체 요약의 "1"과 문서별 요약의 "1"이 백엔드에서 같은 저장 키(user+query+id)로
       // 취급돼 서로 덮어쓰는 사고가 있었다 — 화면에 쓰는 것과 같은 스코프 키(key)를 그대로
       // 저장용 id로 보내서 저장 단계에서도 확실히 구분되게 한다.
-      await saveActionItem(searchQuery, { ...item, id: key });
+      await saveActionItem(searchQuery, { ...item, id: key }, teamId);
       setSavedIds((prev) => new Set(prev).add(key));
     } catch {
       // 실패해도 후보 목록 자체는 그대로 — 사용자가 다시 눌러볼 수 있게 버튼 상태만 원복
@@ -121,6 +140,19 @@ export default function AISummaryPanel({ summary, selectedDoc, searchQuery }) {
           <span className="ai-panel__header-dot" />
           AI 분석{selectedDoc && <span className="ai-panel__header-scope"> · 이 문서만</span>}
         </div>
+        {/* 검색 전체 요약에만 표시 — 문서별 재요약(selectedDoc)은 별도 LLM 호출이라 이 타이밍과
+            무관하다. 배지에 마우스를 올리면 단계별(검색/권한확인/LLM) 분해 수치를 보여준다. */}
+        {!selectedDoc && searchTiming && (
+          <span
+            className="ai-panel__timing-badge"
+            title={
+              `검색 ${searchTiming.retrievalMs}ms · 권한 확인 ${searchTiming.permissionCheckMs}ms · `
+              + `LLM 요약 ${searchTiming.llmSummaryMs}ms`
+            }
+          >
+            ⏱ {(searchTiming.totalMs / 1000).toFixed(1)}초
+          </span>
+        )}
         <h3 className="ai-panel__title">{activeSummary?.title || selectedDoc?.title || summary.title}</h3>
       </div>
 
@@ -141,8 +173,13 @@ export default function AISummaryPanel({ summary, selectedDoc, searchQuery }) {
       <div className="ai-panel__content">
         {docSummaryLoading && (
           <div className="ai-panel__doc-summary-loading">
-            <div className="ai-panel__doc-summary-spinner" />
-            이 문서 요약 만드는 중…
+            <div className="skeleton-block skeleton-block--heading" />
+            <div className="skeleton-block skeleton-block--line" />
+            <div className="skeleton-block skeleton-block--line skeleton-block--short" />
+            <p className="ai-panel__doc-summary-loading-label">
+              <span className="ai-panel__doc-summary-spinner" />
+              이 문서 요약 만드는 중…
+            </p>
           </div>
         )}
         {!docSummaryLoading && docSummaryError && (

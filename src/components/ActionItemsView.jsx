@@ -4,7 +4,7 @@ import './AISummaryPanel.css';
 import { getSourceMeta } from '../data/mockData';
 import { getAllActionItems, toggleActionItemStatus, deleteActionItem } from '../utils/actionItemsStore';
 
-export default function ActionItemsView() {
+export default function ActionItemsView({ teamId } = {}) {
   const [items, setItems] = useState([]);
   const [error, setError] = useState('');
   // 기본을 '전체'로 둔다 — '진행 중'을 기본으로 뒀더니, 체크하는 순간 그 항목이 목록에서
@@ -13,21 +13,21 @@ export default function ActionItemsView() {
   const [filter, setFilter] = useState('all'); // 'all' | 'open' | 'completed'
 
   useEffect(() => {
-    getAllActionItems()
+    getAllActionItems(teamId)
       .then(setItems)
       .catch((e) => setError(e.message));
-  }, []);
+  }, [teamId]);
 
   // 실패해도 목록을 비우지 않는다 — 예전엔 오류 시 빈 배열을 넣어서, 한 번의 네트워크 오류로
   // 할 일이 전부 사라진 것처럼 보였다.
   const handleToggle = (id) => {
     setError('');
-    toggleActionItemStatus(id).then(setItems).catch((e) => setError(e.message));
+    toggleActionItemStatus(id, teamId).then(setItems).catch((e) => setError(e.message));
   };
 
   const handleDelete = (id) => {
     setError('');
-    deleteActionItem(id).then(setItems).catch((e) => setError(e.message));
+    deleteActionItem(id, teamId).then(setItems).catch((e) => setError(e.message));
   };
 
   const openCount = items.filter((i) => i.status !== 'completed').length;

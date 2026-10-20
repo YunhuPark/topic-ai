@@ -1,0 +1,119 @@
+.team-manager__switcher {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.team-manager__invite {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.team-manager__invite-code {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2);
+}
+
+.team-manager__invite-code code {
+  font-size: 0.75rem;
+  color: var(--text-primary);
+  word-break: break-all;
+}
+
+.team-manager__copy-button {
+  flex-shrink: 0;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-default);
+  color: var(--text-secondary);
+  border-radius: var(--radius-full);
+  padding: 4px 12px;
+  font-size: 0.68rem;
+  cursor: pointer;
+  transition: border-color var(--transition-fast), color var(--transition-fast), transform var(--transition-fast);
+}
+
+.team-manager__copy-button:hover:not(:disabled) {
+  border-color: var(--accent-primary);
+  color: var(--text-primary);
+  transform: translateY(-1px);
+}
+
+.team-manager__copy-button:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.team-manager__copy-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.team-manager__copy-button--danger:hover:not(:disabled) {
+  border-color: rgba(239, 68, 68, 0.4);
+  color: #ef4444;
+  background: rgba(239, 68, 68, 0.08);
+}
+
+.team-manager__member-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2);
+  transition: border-color var(--transition-fast), background var(--transition-fast);
+}
+
+.team-manager__member-row:hover {
+  border-color: var(--border-hover);
+  background: var(--bg-elevated);
+}
+
+.team-manager__member-email {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.72rem;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.team-manager__member-role {
+  font-size: 0.64rem;
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+
+/* 평소엔 접어둔 "새 팀 만들기"/"초대 코드로 참여" — 항상 폼을 펼쳐두면 사이드바가
+   복잡해 보인다는 피드백을 받아, 텍스트 링크로 줄이고 눌렀을 때만 그 폼 하나만 편다. */
+.team-manager__toggles {
+  display: flex;
+  gap: var(--space-3);
+}
+
+.team-manager__text-link {
+  background: none;
+  border: none;
+  color: var(--text-tertiary);
+  font-size: 0.68rem;
+  cursor: pointer;
+  padding: 0;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.team-manager__text-link:hover {
+  color: var(--text-primary);
+}
+
+.team-manager__text-link--danger:hover {
+  color: #ef4444;
+}

@@ -13,7 +13,9 @@
 React (Vite) ──fetch──▶ FastAPI (backend/main.py) ──▶ Chroma (로컬 벡터DB)
                               │                              ▲
                               ▼                              │ 오프라인 배치 적재
-                     OpenAI (임베딩, GPT-4o 요약)              │
+                   backend/llm_backend.py (임베딩, 요약)       │
+                   ├─ openai (기본값, gpt-4o-mini)             │
+                   └─ ollama (회사 내부망/로컬 자체 호스팅)     │
                                                     backend/connectors/
                                                     ├─ notion_connector.py
                                                     ├─ slack_connector.py
@@ -21,6 +23,11 @@ React (Vite) ──fetch──▶ FastAPI (backend/main.py) ──▶ Chroma (�
                                                     ├─ github_connector.py
                                                     └─ gitlab_connector.py
 ```
+
+LLM 백엔드는 `LLM_BACKEND` 환경변수(기본값 `openai`)로 전환합니다 — 기업 보안 정책상 외부
+LLM API를 못 쓰는 환경이면 `ollama`로 바꾸고 회사 내부망에 띄운 Ollama 서버를 가리키면 됩니다
+(문서 내용이 외부로 전혀 안 나감). 자세한 내용은 `backend/llm_backend.py` 상단 docstring과
+`backend/.env.example` 참고.
 
 - 프론트엔드: `src/` — React + Vite
 - 백엔드: `backend/` — FastAPI + LangChain + Chroma
@@ -88,6 +95,18 @@ python rag_pipeline.py --source gitlab
 2. 발급된 토큰을 `.env`의 `NOTION_TOKEN`에 입력
 3. 검색되길 원하는 Notion 페이지를 열어 `···` → 연결 추가에서 방금 만든 통합 공유
 
+> **주의 — 이건 Notion API 자체의 제약이라 이 앱이 우회할 방법이 없습니다.** Google
+> Drive/GitHub/GitLab/Slack은 연동 한 번만 해두면 그 뒤로 만든 새 문서도 자동으로 계속
+> 검색에 잡히지만, Notion은 그렇지 않습니다 — 페이지/데이터베이스를 새로 만들 때마다
+> 위 3번 과정("···" → 연결 추가)을 그 문서에도 또 해줘야만 검색에 나옵니다("워크스페이스
+> 전체 접근" 같은 옵션이 Notion API엔 아예 없음).
+>
+> 다행히 **공유는 하위 페이지로 상속됩니다** — 팀 문서용 최상위 페이지를 하나 정해서
+> 거기에만 위 3번을 한 번 해두면, 그 페이지 "아래에" 만드는 하위 페이지는 따로 공유 안
+> 해도 자동으로 같이 공유돼 검색에 잡힙니다. 팀에는 "새 문서는 반드시 이 페이지 아래에
+> 만들어주세요"라고 안내하는 걸 권장합니다 — 그러면 최초 설정 한 번으로 끝나고, 그 뒤로는
+> 다른 소스들과 똑같이 자동으로 동작합니다.
+
 ### Slack
 1. [api.slack.com/apps](https://api.slack.com/apps) → Create New App → Blank app
 2. OAuth & Permissions → Bot Token Scopes에 추가: `channels:history`, `channels:read`, `groups:history`, `groups:read`, `users:read`
@@ -121,8 +140,9 @@ python rag_pipeline.py --source gitlab
 
 | 엔드포인트 | 설명 |
 |---|---|
-| `GET /api/v1/search?q={query}` | 통합 검색 — 관련 문서 top-4 + AI 요약(keyPoints/decisionTrail/actionItems) |
-| `GET /api/v1/stats` | 대시보드용 통계 — 로그인한 사람이 연동해서 가져온 문서만 집계 |
+| `GET /api/v1/search?q={query}&team_id={id}` | 통합 검색 — 관련 문서 top-4 + AI 요약(keyPoints/decisionTrail/actionItems) + 응답 단계별 소요 시간(`timing`). `team_id` 생략 시 개인 스코프. 계정당 하루 호출 한도(`DAILY_SEARCH_LIMIT`) 적용 |
+| `POST /api/v1/summarize-document` | 검색 결과에서 문서 하나를 클릭했을 때 그 문서만 다시 요약. 같은 하루 호출 한도 공유 |
+| `GET /api/v1/stats?team_id={id}` | 대시보드용 통계 — `team_id` 없으면 개인이 연동해서 가져온 문서만, 있으면 그 팀 멤버 전체가 가져온 문서를 합쳐서 집계 |
 | `GET /api/v1/sync-status` | 연동 직후/주기적 재동기화가 지금 진행 중인 소스가 있는지, 마지막 결과(문서 수·실패 여부) |
 | `POST /api/v1/auth/signup` | 회원가입 (이메일+비밀번호) → JWT 토큰 발급. `SIGNUP_ALLOWED_DOMAINS` 설정 시 그 도메인만 허용 |
 | `POST /api/v1/auth/login` | 로그인 → JWT 토큰 발급 |
@@ -130,7 +150,9 @@ python rag_pipeline.py --source gitlab
 | `GET /api/v1/auth/link/{google\|github\|gitlab\|slack\|notion}/start` / `.../callback` | 5개 소스 전부 같은 OAuth 팝업+콜백 패턴 — 연결 성공 시 그 계정 문서 전체를 백그라운드에서 자동 수집 |
 | `DELETE /api/v1/auth/link/{provider}` | 연동 해제 — 그 사람이 이 소스로 가져왔던 문서도 함께 정리 |
 | `GET /api/v1/auth/linked` | 이 계정에 연결된 외부 소스 목록 |
-| `GET /api/v1/search-history`, `GET /api/v1/action-items` | 계정에 귀속된 검색 기록/할 일 조회 |
+| `GET/POST/PATCH/DELETE /api/v1/people` | 동명이인 별칭 사전(정식 이름+별칭 등록) — `team_id` 주면 팀 전체 공유, 없으면 개인 전용 |
+| `GET/POST /api/v1/teams`, `POST /api/v1/teams/{id}/invites`, `POST /api/v1/teams/join`, `GET/DELETE /api/v1/teams/{id}/members` | 팀 생성/초대 코드 발급/참여/멤버 조회·제거 — 초대 코드 방식(SMTP 불필요) |
+| `GET /api/v1/search-history`, `GET /api/v1/action-items` | 계정(또는 팀)에 귀속된 검색 기록/할 일 조회 |
 | `DELETE /api/v1/action-items/{id}` | 할 일 삭제 |
 
 ## 계정 / 권한 인지형 검색
@@ -141,6 +163,14 @@ python rag_pipeline.py --source gitlab
 권한 인지형 검색은 **Google Drive, GitHub, GitLab, Slack, Notion 5개 소스 전부**에 적용돼 있습니다 —
 사이드바에서 각각 계정을 연결하면, 그 사람이 실제로 접근 가능한 문서/저장소/프로젝트/채널/페이지만
 검색에 노출됩니다 (연결 안 하면 그 소스는 결과에서 아예 빠집니다 — 기본 거부).
+
+### 팀 공유
+
+사이드바 "내 팀"에서 팀을 만들고 초대 코드(SMTP 없이, Discord/Slack 스타일)로 멤버를 초대할 수
+있습니다. 팀을 선택하면 별칭 사전·할 일 리스트·대시보드 통계가 팀 전체와 공유되지만, **검색
+결과(문서 열람) 범위는 공유되지 않습니다** — 팀원이 가져온 문서라도, 보는 사람이 그 소스에
+직접 연동돼 있지 않으면 여전히 안 보입니다. 원본 소스(Notion/Drive/GitHub 등)의 실제 접근
+권한을 이 앱이 우회하지 않는다는 원칙을 유지하기 위함입니다.
 
 - **Google Drive**: "Google Drive 연결" — GitHub/GitLab과 같은 표준 OAuth Authorization Code
   플로우입니다(`GOOGLE_OAUTH_CLIENT_ID`/`SECRET` 필요). refresh_token이 서버에 저장되므로 한 번
@@ -215,9 +245,34 @@ python rag_pipeline.py --source gitlab
 ## 배포
 
 지금까지는 로컬/사내망에서 `localhost`로만 써왔지만, 실제 서버에 올릴 때 필요한 설정은 대부분
-환경변수로 이미 빠져 있습니다 — 소스를 고칠 필요는 없고 아래만 맞추면 됩니다.
+환경변수로 이미 빠져 있습니다 — 소스를 고칠 필요는 없고 아래만 맞추면 됩니다. 어떤 값들이
+있는지는 `backend/.env.example`과 레포 루트의 `.env.example`을 참고(각각 `backend/.env`,
+`.env`로 복사해서 채우면 됨).
 
-### 백엔드
+### Render로 배포하기
+
+레포 루트의 `render.yaml`(Blueprint)이 백엔드+프론트엔드 정적 사이트를 한 번에 정의해둔다.
+Render 대시보드 → New → **Blueprint** → 이 GitHub 저장소 연결하면 자동으로 두 서비스가
+만들어진다. 주의할 점:
+
+- **지금은 포트폴리오/데모 단계라 Free 플랜 기준으로 작성해뒀다** — 영구 디스크가 없어서
+  15분 비활동 후 슬립했다 깨어날 때마다 컨테이너가 새로 생성되며 `app.db`/`chroma_db`가
+  초기화된다. 회원가입→연동→검색 자체는 매번 되지만, 미리 쌓아둔 데모 데이터는 유지되지
+  않는다. 실사용(데이터가 계속 유지돼야 함)으로 전환할 때는 `render.yaml` 상단 주석에
+  적어둔 3단계(Starter 플랜 전환 + disk 블록 주석 해제 + `DB_PATH`/`CHROMA_PERSIST_DIR`
+  환경변수 추가)만 하면 된다 — 코드 수정은 이미 끝나 있다.
+- `render.yaml`에 `sync: false`로 표시된 환경변수(API 키·시크릿 등)는 값을 안 적어뒀다 —
+  Blueprint 적용 후 Render 대시보드에서 각 서비스의 Environment 탭에 직접 입력해야 한다.
+- 서비스 이름(`topic-thread-backend`/`topic-thread-frontend`)이 이미 다른 사람이 쓰고
+  있으면 Render가 임의 접미사를 붙인 다른 URL을 배정한다 — 그러면 `render.yaml`에 미리
+  적어둔 `FRONTEND_ORIGINS`/`VITE_API_BASE`/각 `*_OAUTH_REDIRECT_URI` 값을 실제 배정된
+  URL로 맞춰서 대시보드에서 수정해야 한다.
+- OAuth 앱(Google/GitHub/GitLab/Slack/Notion) 콘솔에도 각각 실제 배정된 백엔드 URL로
+  Redirect URI를 등록해야 한다 (아래 "커넥터 설정" 절 참고).
+
+### 직접 VM에 배포하기 (Oracle Cloud 등)
+
+#### 백엔드
 1. **`FRONTEND_ORIGINS`**(`backend/.env`) — 배포한 프론트엔드 주소로 설정. 콤마로 여러 개 가능
    (예: `https://topic-thread.example.com`). OAuth 콜백이 `postMessage`를 보낼 origin과 CORS
    허용 origin이 둘 다 이 값을 쓴다.
@@ -234,11 +289,16 @@ python rag_pipeline.py --source gitlab
    uvicorn main:app --host 0.0.0.0 --port 8000   # --reload 빼고, --workers 지정하지 않음(기본 1)
    ```
 4. **`backend/app.db`(SQLite)와 `backend/chroma_db/`는 영속 디스크에 있어야** 한다 — 컨테이너
-   재배포 때 날아가면 계정·연동·색인 문서가 전부 사라진다.
+   재배포 때 날아가면 계정·연동·색인 문서가 전부 사라진다. 코드와 다른 경로에 디스크를
+   마운트하는 환경(컨테이너 등)이면 `DB_PATH`/`CHROMA_PERSIST_DIR`(`backend/.env`)로 그
+   경로를 가리키면 된다 — 둘 다 안 주면 기존처럼 `backend/` 디렉터리 안을 그대로 쓴다.
 5. `SIGNUP_ALLOWED_DOMAINS`(`backend/.env`, 콤마로 여러 도메인)를 설정하면 그 도메인 이메일만
    회원가입할 수 있다. 사내 배포라면 설정을 권장 — 비워두면(기본값) 아무나 가입 가능하다.
+6. `DAILY_SEARCH_LIMIT`(`backend/.env`, 기본값 50) — 계정당 하루 검색+문서 재요약 합산 한도.
+   도메인 제한 없이 공개 배포(포트폴리오/데모 등)할 때, 낯선 방문자가 검색을 반복해서
+   OpenAI 크레딧을 소진시키는 걸 막기 위한 안전장치. 넘으면 429와 함께 한도 메시지를 반환한다.
 
-### 프론트엔드
+#### 프론트엔드
 `VITE_API_BASE`를 배포한 백엔드 주소로 설정하고 빌드한다 (안 주면 `http://localhost:8000` 기본값):
 ```bash
 VITE_API_BASE=https://api.example.com npm run build
@@ -246,7 +306,9 @@ VITE_API_BASE=https://api.example.com npm run build
 
 ### 아직 안 된 것
 - 비밀번호 재설정(SMTP 발신 필요) — 지금은 없음, 계정 잠기면 관리자가 DB에서 직접 처리해야 함
-- 대용량 문서는 토큰 어림치로 잘라서 임베딩(청킹 미구현) — 아주 긴 문서는 뒷부분이 검색에 안 잡힐 수 있음
+- Render **Starter 플랜 + 영구 디스크 전환** — 지금은 포트폴리오/데모 단계라 Free 플랜으로
+  두고 있음(데이터가 슬립할 때마다 초기화됨). 실사용 전환 시 `render.yaml` 상단 주석의
+  3단계만 따라가면 됨(코드 변경은 불필요).
 
 ## 알려진 운영 이슈
 

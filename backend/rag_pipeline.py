@@ -25,6 +25,8 @@ from openai import OpenAI, RateLimitError
 
 from dummy_data import mock_documents
 from models import Summary
+import llm_backend
+import db
 
 # 1. 임베딩 모델 설정
 #
@@ -33,7 +35,9 @@ from models import Summary
 # Smart App Control이 그걸 차단하면 백엔드 자체가 기동하지 못한다. 모델과 호출 파라미터가 같아서
 # 만들어지는 벡터는 동일하므로, 이미 적재된 문서를 다시 임베딩할 필요는 없다.
 EMBEDDING_MODEL = "text-embedding-3-small"
-SUMMARY_MODEL = "gpt-4o"
+# gpt-4o 대비 비용이 훨씬 저렴하면서(약 1/15) 이 구조화된 JSON 요약 작업에는 품질 차이가
+# 크게 체감되지 않는다 — 회사 규모로 사용량이 늘어도 비용이 감당 가능한 수준으로 유지된다.
+SUMMARY_MODEL = "gpt-4o-mini"
 OPENAI_TIMEOUT_SECONDS = 60
 
 # text-embedding-3-small의 입력 상한은 8191 토큰. tiktoken 없이 정확히 세지 못하므로 넉넉히
@@ -60,6 +64,77 @@ def _truncate_for_embedding(text: str, budget: float = _EMBED_TOKEN_BUDGET) -> s
     # 어림치 기준으로 비율만큼 자른다 (정확할 필요는 없고, API 상한만 넘지 않으면 된다)
     ratio = budget / _estimate_tokens(text)
     return text[: max(1, int(len(text) * ratio))]
+
+
+# _EMBED_TOKEN_BUDGET(7500)은 "OpenAI 임베딩 API 한 번 호출 상한"이지 검색 정밀도를 위한
+# 청크 크기가 아니다 — 그보다 훨씬 작아야 청크 하나의 임베딩이 한 가지 내용에 집중된다.
+# 예전엔 문서가 이 상한을 넘으면 _truncate_for_embedding으로 뒷부분을 그냥 잘라버렸는데,
+# 그러면 벡터가 문서 앞부분만 대표하게 돼서 뒷부분 내용은 검색해도 안 걸렸다.
+_CHUNK_TARGET_TOKENS = 1200
+_CHUNK_OVERLAP_TOKENS = 150  # 청크 경계에서 문맥이 끊기는 걸 완화하려고 앞 청크 꼬리를 이어붙임
+
+
+def _split_into_paragraphs(text: str) -> list[str]:
+    return [p for p in re.split(r"\n\s*\n", text) if p.strip()]
+
+
+def _hard_slice(text: str, budget_tokens: float) -> list[str]:
+    """개행이 거의 없는 한 덩어리(압축된 코드 등)용 폴백 — 공백 기준으로 끊고,
+    공백을 못 찾으면 비율 기반 강제 절단(_truncate_for_embedding과 동일한 방식)."""
+    pieces, remaining = [], text
+    while remaining:
+        if _estimate_tokens(remaining) <= budget_tokens:
+            pieces.append(remaining)
+            break
+        ratio = budget_tokens / _estimate_tokens(remaining)
+        cut = max(1, int(len(remaining) * ratio))
+        break_at = remaining.rfind(" ", 0, cut)
+        if break_at <= 0:
+            break_at = cut
+        pieces.append(remaining[:break_at])
+        remaining = remaining[break_at:].lstrip()
+    return pieces
+
+
+def _tail_by_tokens(text: str, budget_tokens: float) -> str:
+    if budget_tokens <= 0 or _estimate_tokens(text) <= budget_tokens:
+        return text
+    ratio = budget_tokens / _estimate_tokens(text)
+    return text[-max(1, int(len(text) * ratio)):]
+
+
+def _chunk_text(
+    text: str,
+    target_tokens: float = _CHUNK_TARGET_TOKENS,
+    overlap_tokens: float = _CHUNK_OVERLAP_TOKENS,
+) -> list[str]:
+    """target_tokens 이하면 그대로 [text] 하나(청크 분할 없음 — 대다수 문서가 이 경로).
+    넘으면 문단(빈 줄) 경계를 우선 존중해 나누고, 문단 자체가 너무 길면(개행 없는 코드 등)
+    공백 기준 강제 분할로 대체한다. 청크 사이엔 overlap_tokens만큼 앞 청크 꼬리를 이어
+    붙여 문단 경계에서 문맥이 끊기는 걸 완화한다."""
+    if _estimate_tokens(text) <= target_tokens:
+        return [text]
+
+    paragraphs = _split_into_paragraphs(text) or [text]
+    units = []
+    for p in paragraphs:
+        units.extend(_hard_slice(p, target_tokens) if _estimate_tokens(p) > target_tokens else [p])
+
+    chunks: list[str] = []
+    current_parts: list[str] = []
+    current_tokens = 0.0
+    for unit in units:
+        unit_tokens = _estimate_tokens(unit)
+        if current_parts and current_tokens + unit_tokens > target_tokens:
+            chunks.append("\n\n".join(current_parts))
+            tail = _tail_by_tokens(chunks[-1], overlap_tokens)
+            current_parts = [tail] if tail else []
+            current_tokens = _estimate_tokens(tail) if tail else 0.0
+        current_parts.append(unit)
+        current_tokens += unit_tokens
+    if current_parts:
+        chunks.append("\n\n".join(current_parts))
+    return chunks
 
 
 class OpenAIDirectEmbeddings(Embeddings):
@@ -111,10 +186,24 @@ class OpenAIDirectEmbeddings(Embeddings):
         return self._embed([text])[0]
 
 
-embeddings = OpenAIDirectEmbeddings()
+class OllamaDirectEmbeddings(Embeddings):
+    """OpenAIDirectEmbeddings와 같은 최소 인터페이스를, 회사 내부망(또는 로컬)에 뜬 Ollama
+    서버로 구현한 버전. 문서 내용이 외부로 전혀 나가지 않는다는 게 유일한 차이이고, Chroma
+    입장에서는 두 구현을 구분할 필요가 없다 — embed_documents/embed_query만 맞으면 된다."""
 
-# 2. Chroma DB 세팅 (로컬 디스크에 저장)
-CHROMA_PERSIST_DIR = "./chroma_db"
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        return llm_backend.ollama_embed_texts([_truncate_for_embedding(t) for t in texts])
+
+    def embed_query(self, text: str) -> List[float]:
+        return llm_backend.ollama_embed_texts([_truncate_for_embedding(text)])[0]
+
+
+# LLM_BACKEND 환경변수(기본값 openai)로 전환 — llm_backend.py 모듈 docstring 참고.
+embeddings = OllamaDirectEmbeddings() if llm_backend.is_ollama_backend() else OpenAIDirectEmbeddings()
+
+# 2. Chroma DB 세팅 (로컬 디스크에 저장) — DB_PATH와 같은 이유로 CHROMA_PERSIST_DIR도
+# 환경변수로 덮어쓸 수 있게 한다(Render 등에서 영구 디스크 마운트 경로를 가리키기 위함).
+CHROMA_PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR") or "./chroma_db"
 
 def get_vectorstore():
     # 저장된 DB가 있으면 불러오고, 없으면 새로 만듭니다.
@@ -170,22 +259,28 @@ def ingest_documents(source_docs: list[dict], synced_by_user_id: Optional[int] =
     if not source_docs:
         return 0
 
-    # API Key 검증
-    if not os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY") == "your_openai_api_key_here":
-        print("OPENAI_API_KEY가 설정되지 않아 임베딩을 진행할 수 없습니다. .env 파일을 확인해 주세요.")
-        return 0
+    # API Key 검증 — ollama 백엔드는 OpenAI 키가 필요 없다
+    if not llm_backend.is_ollama_backend():
+        if not os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY") == "your_openai_api_key_here":
+            print("OPENAI_API_KEY가 설정되지 않아 임베딩을 진행할 수 없습니다. .env 파일을 확인해 주세요.")
+            return 0
 
     vectorstore = get_vectorstore()
-    ids = [doc['id'] for doc in source_docs]
-    existing = _load_existing_metadata(vectorstore, ids)
+    base_ids = [doc['id'] for doc in source_docs]
+    # 문서가 여러 청크로 쪼개져도 chunk-0의 id == base_id라, 여기 한 번 조회로 문서 단위
+    # contentHash/chunkCount 등 "대표" 메타데이터를 전부 얻을 수 있다.
+    existing = _load_existing_metadata(vectorstore, base_ids)
 
     docs_to_embed = []
     ids_to_embed = []
     metadata_only_ids = []
     metadata_only_values = []
+    stale_ids_to_delete = []
+    embedded_base_ids = set()
 
     for doc in source_docs:
-        prev = existing.get(doc['id'], {})
+        base_id = doc['id']
+        prev = existing.get(base_id, {})
         owners = synced_by_set(prev.get("syncedBy"))
         if synced_by_user_id is not None:
             owners.add(str(synced_by_user_id))
@@ -193,36 +288,65 @@ def ingest_documents(source_docs: list[dict], synced_by_user_id: Optional[int] =
         digest = content_hash(doc['title'], doc['content'])
         if prev and prev.get("contentHash") == digest:
             # 내용이 그대로면 임베딩을 다시 하지 않는다 (비용의 대부분이 여기서 절약된다).
-            # 다만 다른 사람이 같은 문서를 새로 연동했다면 syncedBy만 갱신해준다.
-            if prev.get("syncedBy") != synced_by_str(owners):
-                metadata_only_ids.append(doc['id'])
-                metadata_only_values.append({**prev, "syncedBy": synced_by_str(owners)})
+            # 다만 다른 사람이 같은 문서를 새로 연동했다면 syncedBy만 갱신해준다 — 청크로
+            # 쪼개진 문서라면 모든 형제 청크 행에 반영해야 한다(대표 행만 갱신하면, 통계/검색이
+            # 다른 청크 행을 대표로 고를 때 소유권이 낡은 채로 보일 수 있다).
+            new_synced = synced_by_str(owners)
+            if prev.get("syncedBy") != new_synced:
+                chunk_count = int(prev.get("chunkCount", 1))
+                for i in range(chunk_count):
+                    sib_id = base_id if i == 0 else f"{base_id}::chunk-{i}"
+                    metadata_only_ids.append(sib_id)
+                    metadata_only_values.append({**prev, "id": sib_id, "chunkIndex": i, "syncedBy": new_synced})
             continue
 
-        # 벡터 검색을 위해 검색할 텍스트 덩어리(page_content) 생성
-        page_content = f"Title: {doc['title']}\n\nContent:\n{doc['content']}"
+        # 문서가 클 때만 여러 청크로 쪼갠다 — 대다수 문서는 그대로 1개 청크([text])라 아래
+        # 루프가 기존과 동일하게 딱 1개 행만 만든다.
+        chunks = _chunk_text(doc['content'])
+        chunk_count = len(chunks)
+        old_chunk_count = int(prev.get("chunkCount", 1)) if prev else 0
+        if old_chunk_count > chunk_count:
+            # 재청크로 청크 수가 줄었다(문서가 짧아짐) — 남는 뒤쪽 청크 행은 아래에서 새
+            # 청크들을 upsert한 "다음에" 지운다(먼저 지우면 임베딩이 도는 동안 검색 공백이
+            # 생긴다 — add_documents가 delete 없이 upsert인 이유와 같은 원칙).
+            stale_ids_to_delete.extend(
+                base_id if i == 0 else f"{base_id}::chunk-{i}"
+                for i in range(chunk_count, old_chunk_count)
+            )
 
-        # 원본 메타데이터 보존 (content도 함께 저장 — page_content는 "Title: ...\n\nContent:\n..."
-        # 형태라 그대로 스니펫으로 쓰면 임베딩용 접두사가 노출되기 때문에 원본 본문을 따로 둔다)
-        metadata = {
-            "id": doc['id'],
-            "title": doc['title'],
-            "source": doc['source'],
-            "author": doc['author'],
-            "date": doc['date'],
-            "content": doc['content'],
-            # Chroma 메타데이터는 리스트를 못 담아서 콤마로 join, 조회 시 다시 split
-            "tags": ",".join(doc.get('tags', [])),
-            "sourceUrl": doc.get('sourceUrl', ''),
-            "syncedBy": synced_by_str(owners),
-            "contentHash": digest,
-            # 원본이 마지막으로 수정된 시각 — 다음 동기화 때 "이 문서는 안 바뀌었으니 본문을
-            # 다시 받아올 필요도 없다"를 커넥터가 판단하는 기준
-            "sourceUpdatedAt": doc.get("sourceUpdatedAt", ""),
-        }
+        synced = synced_by_str(owners)
+        for i, chunk in enumerate(chunks):
+            chunk_id = base_id if i == 0 else f"{base_id}::chunk-{i}"
+            # 벡터 검색을 위해 검색할 텍스트 덩어리(page_content) 생성 — 이 청크 슬라이스만 담음
+            page_content = f"Title: {doc['title']}\n\nContent:\n{chunk}"
 
-        docs_to_embed.append(Document(page_content=page_content, metadata=metadata))
-        ids_to_embed.append(doc['id'])
+            # content는 항상 전체 원문(청크로 안 잘림) — 모든 형제 청크 행에 동일하게 중복
+            # 저장해서, 검색 결과 표시/AI 요약/통계 등은 청크 중 아무거나 하나를 대표로 삼아도
+            # 항상 문서 전체를 보게 된다(page_content는 "Title: ...\n\nContent:\n..." 형태라
+            # 그대로 스니펫으로 쓰면 임베딩용 접두사가 노출되기 때문에 원본 본문을 따로 둔다).
+            metadata = {
+                "id": chunk_id,
+                "baseId": base_id,
+                "chunkIndex": i,
+                "chunkCount": chunk_count,
+                "title": doc['title'],
+                "source": doc['source'],
+                "author": doc['author'],
+                "date": doc['date'],
+                "content": doc['content'],
+                # Chroma 메타데이터는 리스트를 못 담아서 콤마로 join, 조회 시 다시 split
+                "tags": ",".join(doc.get('tags', [])),
+                "sourceUrl": doc.get('sourceUrl', ''),
+                "syncedBy": synced,
+                "contentHash": digest,
+                # 원본이 마지막으로 수정된 시각 — 다음 동기화 때 "이 문서는 안 바뀌었으니 본문을
+                # 다시 받아올 필요도 없다"를 커넥터가 판단하는 기준
+                "sourceUpdatedAt": doc.get("sourceUpdatedAt", ""),
+            }
+
+            docs_to_embed.append(Document(page_content=page_content, metadata=metadata))
+            ids_to_embed.append(chunk_id)
+        embedded_base_ids.add(base_id)
 
     if metadata_only_ids:
         try:
@@ -235,9 +359,36 @@ def ingest_documents(source_docs: list[dict], synced_by_user_id: Optional[int] =
         # 덮어쓴다 — 예전엔 먼저 delete를 했는데, 임베딩이 도는 수초~수분 동안 그 문서들이
         # 검색에서 사라지는 구간이 생겨서 없앴다.
         vectorstore.add_documents(docs_to_embed, ids=ids_to_embed)
-        print(f"문서 {len(docs_to_embed)}개를 새로 임베딩했습니다 (변경 없음: {len(source_docs) - len(docs_to_embed)}개).")
+        print(f"문서 {len(embedded_base_ids)}개({len(docs_to_embed)}개 청크)를 새로 임베딩했습니다 "
+              f"(변경 없음: {len(source_docs) - len(embedded_base_ids)}개).")
 
-    return len(docs_to_embed)
+    if stale_ids_to_delete:
+        try:
+            vectorstore.delete(ids=stale_ids_to_delete)
+        except Exception as e:
+            print(f"오래된 청크 정리 실패: {e}")
+
+    # 청크 행 수가 아니라 "실제로 임베딩한 문서 수" — sync-status의 lastCount가 사용자에게
+    # "N개 문서 동기화"로 보이므로, 청크 행 수를 반환하면 큰 파일 하나가 "5개 문서 동기화"처럼
+    # 오해를 부른다.
+
+    # 동기화된 문서의 author들을 workspace_authors 로스터에 누적한다.
+    # 소스별로 묶어서 한 번씩만 호출해 DB 왕복을 줄인다.
+    if source_docs:
+        source_to_authors: dict[str, list[str]] = {}
+        for d in source_docs:
+            src = d.get("source", "")
+            author = d.get("author", "").strip()
+            if src and author and author != "알 수 없음":
+                source_to_authors.setdefault(src, []).append(author)
+        for src_name, names in source_to_authors.items():
+            try:
+                db.upsert_workspace_authors(list(set(names)), source=src_name)
+            except Exception as e:
+                print(f"workspace_authors 누적 실패({src_name}): {e}")
+
+    return len(embedded_base_ids)
+
 
 
 def ingest_mock_documents():
@@ -346,31 +497,45 @@ def _known_documents(source: str, user_id: Optional[int]) -> dict[str, str]:
     for meta in got.get("metadatas", []) or []:
         if not meta or marker not in synced_by_set(meta.get("syncedBy")):
             continue
-        known[meta.get("id", "")] = meta.get("sourceUpdatedAt", "") or ""
-    known.pop("", None)
+        # baseId 기준으로 모아야 한다 — 커넥터가 돌려주는 seen_ids는 항상 base id뿐이라,
+        # 여기서 청크 접미사 id를 그대로 담으면 다음 동기화 때 절대 안 겹쳐서 청크로 쪼개진
+        # 문서가 매번 "원본에서 사라진 문서"로 오인되어 지워진다. dict라 여러 청크 행이
+        # base_id 하나로 자연스럽게 합쳐지므로 별도 중복 제거는 필요 없다.
+        base_id = meta.get("baseId") or meta.get("id", "")
+        if not base_id:
+            continue
+        known[base_id] = meta.get("sourceUpdatedAt", "") or ""
     return known
 
 
-def _prune_missing_documents(missing_ids: list[str], user_id: int) -> int:
+def _prune_missing_documents(missing_base_ids: list[str], user_id: int) -> int:
     """원본에서 사라진(삭제됐거나 접근 권한을 잃은) 문서에서 이 사용자를 떼어낸다.
     아무도 안 가져오는 문서가 되면 컬렉션에서 완전히 지운다. 이게 없으면 삭제된 Drive 파일이나
-    이름이 바뀐 저장소의 이슈가 영원히 검색에 남는다."""
-    if not missing_ids:
+    이름이 바뀐 저장소의 이슈가 영원히 검색에 남는다.
+
+    missing_base_ids는 base id(청크 접미사 없음)다 — 문서가 여러 청크로 쪼개져 있으면 형제
+    청크 행 전부를 같이 갱신/삭제해야 한다(대표 chunk-0 행만 지우면 나머지 청크 행이 영원히
+    고아로 남는다)."""
+    if not missing_base_ids:
         return 0
 
     vectorstore = get_vectorstore()
-    existing = _load_existing_metadata(vectorstore, missing_ids)
+    existing = _load_existing_metadata(vectorstore, missing_base_ids)  # chunk-0 대표 조회
     to_delete = []
     update_ids, update_metas = [], []
 
-    for doc_id, meta in existing.items():
+    for base_id, meta in existing.items():
         owners = synced_by_set(meta.get("syncedBy"))
         owners.discard(str(user_id))
+        chunk_count = int(meta.get("chunkCount", 1))
+        sibling_ids = [base_id if i == 0 else f"{base_id}::chunk-{i}" for i in range(chunk_count)]
         if owners:
-            update_ids.append(doc_id)
-            update_metas.append({**meta, "syncedBy": synced_by_str(owners)})
+            new_synced = synced_by_str(owners)
+            for i, sib_id in enumerate(sibling_ids):
+                update_ids.append(sib_id)
+                update_metas.append({**meta, "id": sib_id, "chunkIndex": i, "syncedBy": new_synced})
         else:
-            to_delete.append(doc_id)
+            to_delete.extend(sibling_ids)
 
     try:
         if update_ids:
@@ -381,7 +546,7 @@ def _prune_missing_documents(missing_ids: list[str], user_id: int) -> int:
         print(f"사라진 문서 정리 실패: {e}")
         return 0
 
-    return len(missing_ids)
+    return len(missing_base_ids)
 
 
 def remove_user_documents(provider: str, user_id: int) -> int:
@@ -466,6 +631,7 @@ def sync_documents_for_user(provider: str, access_token: str, user_id: Optional[
             )
         return embedded
 
+
 # 3. LLM 요약 프롬프트 셋업
 # 출력 형식은 응답 스키마(models.Summary)에서 직접 뽑아 프롬프트에 박아 넣는다.
 prompt_template = """
@@ -477,7 +643,9 @@ prompt_template = """
 
 [검색된 문서들 (Context)]
 {context}
-
+{known_people_section}
+{doc_authors_section}
+{roster_section}
 [지시사항]
 위 문서들을 바탕으로 다음 정보를 추출하여 반드시 JSON 형식으로 응답하세요.
 1. keyPoints: 전체 문서의 핵심 내용을 3-4개의 문장으로 요약한 리스트
@@ -504,10 +672,32 @@ prompt_template = """
       (예: Slack 메시지라면 그 메시지를 쓴 사람, 문서라면 그 문서를 쓴 사람이 기본 담당자).
    c) 문서 작성자도 불분명하거나 여러 사람이 섞여 있어 특정하기 어려우면 "미정"이라고 쓰세요.
       절대로 문서에 등장하지 않는 이름을 지어내지 마세요.
-   d) 이름이 성 없이 이름만(예: "승현님") 나오고, 그 성만 다른 동명이인이 있는지 문맥만으로는
-      확신할 수 없는 경우, 임의로 특정 성을 붙여 완전한 이름을 지어내지 말고 대화에 나온 표현
-      그대로("승현님") 쓰세요 — 잘못 추측해서 엉뚱한 사람에게 할 일이 배정되는 것이, 이름을
-      불완전하게 남겨두는 것보다 더 나쁩니다.
+   d) 이름이 성 없이 이름만(예: "승현님") 나오면, 아래 세 후보 목록을 이 순서 그대로 확인하세요.
+      1) 먼저 [알려진 사람 목록](사용자가 직접 등록한 정식 이름+별칭 사전)에서 별칭이 일치하는
+         사람을 모두 찾으세요.
+         - 정확히 한 명과만 일치하면 그 사람의 정식 이름(canonical name)을 담당자로 쓰고, 2)는
+           확인하지 않습니다.
+         - 두 명 이상과 동시에 일치하면, 목록에 먼저 나온 사람을 임의로 고르지 말고 대화에 나온
+           표현 그대로("승현님") 쓰고 더 이상 진행하지 않습니다.
+      2) [알려진 사람 목록]이 비어 있거나 일치하는 사람이 아예 없을 때만, [문서 작성자 후보]
+         목록(이번 검색 결과 문서들에 실제로 등장한 전체 이름 — 별도 등록 없이 문서에서 자동으로
+         뽑힌 것)에서 그 짧은 이름을 부분 문자열로 포함하는 전체 이름을 찾으세요(예: "승현"은
+         "송승현"과 "이승현"을 둘 다 포함).
+         - 정확히 한 명의 전체 이름과만 일치하면 그 전체 이름을 담당자로 쓰세요.
+         - 두 명 이상의 전체 이름과 동시에 일치하거나, 이 목록에도 일치하는 사람이 없으면 3)으로
+           넘어가세요.
+      3) [문서 작성자 후보]에도 없을 때만, [워크스페이스 인물 로스터](이번 검색에 안 잡힌 문서의
+         작성자까지 포함한 워크스페이스 전체 이름 목록)에서 그 짧은 이름을 부분 문자열로 포함하는
+         전체 이름을 찾으세요.
+         - 정확히 한 명의 전체 이름과만 일치하면 그 전체 이름을 담당자로 쓰세요.
+         - 두 명 이상과 동시에 일치하거나 이 목록에도 없으면, 대화에 나온 표현 그대로("승현님")
+           쓰세요.
+      **세 목록 모두, 후보가 둘 이상으로 겹칠 때 임의로 한 명을 찍어 정규화하는 것은 항상
+      "원문 표현 그대로 남겨두는 것"보다 나쁩니다** — 어느 한 명을 찍으면 실제로는 다른 사람의
+      할 일이 엉뚱한 사람에게 배정되는 것이기 때문입니다. [문서 작성자 후보]와 [워크스페이스
+      인물 로스터]는 [알려진 사람 목록]과 달리 등록된 별칭이 없는 "전체 이름 그대로"인 목록이라는
+      점도 유의하세요 — 부분 문자열 포함 여부로만 판단하고, 비슷하게 들린다고 다른 이름을
+      추측해서 매칭하지 마세요.
 
 [형식 지침]
 응답은 반드시 아래의 JSON 스키마를 따라야 하며, 마크다운 코드블록 없이 순수 JSON 문자열만 반환하세요.
@@ -531,16 +721,23 @@ def _normalize_status(status: str) -> str:
         return normalized
     return _STATUS_ALIASES.get(status.strip(), "pending")
 
-def generate_ai_summary(query: str, retrieved_docs: List[Document], api_key: str = None) -> Optional[dict]:
+def generate_ai_summary(
+    query: str,
+    retrieved_docs: List[Document],
+    api_key: str = None,
+    known_people: Optional[List[dict]] = None,
+    workspace_authors: Optional[List[str]] = None,
+) -> Optional[dict]:
     """검색된 문서들을 바탕으로 LLM을 호출하여 요약 JSON을 반환합니다.
 
     실패하면 None을 반환한다 — 예전엔 mock 요약(dummy_data)을 대신 돌려줬는데, 사용자 입장에서는
     진짜 요약과 구분할 방법이 없고 그 가짜 액션아이템이 할 일 리스트에 저장되기까지 했다.
     실패는 실패로 알리는 게 맞다."""
 
-    # 1. API 키 확인
+    # 1. API 키 확인 — ollama 백엔드는 OpenAI 키가 필요 없다(로컬/사내망 모델을 그대로 호출)
+    use_ollama = llm_backend.is_ollama_backend()
     actual_api_key = api_key or os.getenv("OPENAI_API_KEY")
-    if not actual_api_key or actual_api_key == "your_openai_api_key_here":
+    if not use_ollama and (not actual_api_key or actual_api_key == "your_openai_api_key_here"):
         print("OPENAI_API_KEY가 설정되지 않아 요약을 생성할 수 없습니다.")
         return None
 
@@ -555,21 +752,69 @@ def generate_ai_summary(query: str, retrieved_docs: List[Document], api_key: str
             ]
         )
 
-        # 3. LLM 호출 (openai SDK 직접 호출 — JSON 모드로 스키마를 강제한다)
+        # 2b. 알려진 사람 목록 (동명이인 정규화용) — 비어 있으면 섹션 자체를 생략한다
+        known_people_section = ""
+        if known_people:
+            people_lines = "\n".join(
+                f"- {p['display_name']} (별칭: {', '.join(p['aliases'])})"
+                for p in known_people
+                if p.get("aliases")
+            )
+            if people_lines:
+                known_people_section = f"\n[알려진 사람 목록]\n{people_lines}\n"
+
+        # 2c. 문서 작성자 후보 — 사용자가 [알려진 사람 목록]에 별도로 등록해두지 않은 사람도,
+        # 이번 검색 결과 문서에 실명이 이미 등장했다면 "짧은 이름 → 전체 이름" 매칭 후보로 쓸 수
+        # 있다(별칭 사전을 매번 수동으로 채워야만 동명이인이 풀리던 한계 보완, PRD "오픈 이슈"
+        # 참고). [알려진 사람 목록]에 이미 정식 이름으로 등록된 사람은 중복 표시하지 않는다.
+        known_names = {p["display_name"] for p in (known_people or [])}
+        doc_authors = sorted({
+            author
+            for doc in retrieved_docs
+            if (author := doc.metadata.get("author", "").strip())
+            and author not in ("알 수 없음", "")
+            and author not in known_names
+        })[:20]
+        doc_authors_section = (
+            f"\n[문서 작성자 후보] (이번 검색 결과에 실제로 등장한 이름 — 등록된 별칭 없음)\n"
+            + "\n".join(f"- {name}" for name in doc_authors) + "\n"
+        ) if doc_authors else ""
+        # 2d. 워크스페이스 전체 인물 로스터 — 이번 검색에 안 잡힌 문서의 작성자도 포함하는
+        # 전체 이름 목록. 동기화가 누적해온 워크스페이스 전체 이름으로 구성된다
+        # (PRD §7 "워크스페이스 전체 인물 로스터" 오픈 이슈 구현).
+        # [알려진 사람 목록]이나 [문서 작성자 후보]에 이미 있는 이름은 중복 제외한다.
+        all_candidate_names = known_names | set(doc_authors)
+        roster_names = sorted(
+            name for name in (workspace_authors or [])
+            if name not in all_candidate_names
+        )[:50]  # 프롬프트 토큰 사용량을 줄이기 위해 50명 제한
+        roster_section = (
+            f"\n[워크스페이스 인물 로스터] (이번 검색에 안 잡힌 문서 작성자 포함 전체 이름 — 부분 문자열 매칭용)\n"
+            + "\n".join(f"- {name}" for name in roster_names) + "\n"
+        ) if roster_names else ""
+
+        # 3. LLM 호출 — 어느 백엔드든 "JSON 문자열을 강제로 뱉게 한다"는 계약은 같아서
+        # 이후(스키마 검증 등) 코드는 백엔드와 무관하게 동일하다.
         prompt = prompt_template.format(
             query=query,
             context=context_str,
+            known_people_section=known_people_section,
+            doc_authors_section=doc_authors_section,
+            roster_section=roster_section,
             format_instructions=json.dumps(Summary.model_json_schema(), ensure_ascii=False),
         )
-        print(f"LLM 호출 중... (검색된 문서 {len(retrieved_docs)}개 기반)")
-        client = OpenAI(api_key=actual_api_key, timeout=OPENAI_TIMEOUT_SECONDS)
-        completion = client.chat.completions.create(
-            model=SUMMARY_MODEL,
-            temperature=0,
-            response_format={"type": "json_object"},
-            messages=[{"role": "user", "content": prompt}],
-        )
-        result = json.loads(completion.choices[0].message.content)
+        print(f"LLM 호출 중... (검색된 문서 {len(retrieved_docs)}개 기반, backend={'ollama' if use_ollama else 'openai'})")
+        if use_ollama:
+            result = llm_backend.ollama_chat_json(prompt)
+        else:
+            client = OpenAI(api_key=actual_api_key, timeout=OPENAI_TIMEOUT_SECONDS)
+            completion = client.chat.completions.create(
+                model=SUMMARY_MODEL,
+                temperature=0,
+                response_format={"type": "json_object"},
+                messages=[{"role": "user", "content": prompt}],
+            )
+            result = json.loads(completion.choices[0].message.content)
 
         # 응답 스키마에 맞는지 확인 (안 맞으면 에러 발생 → 요약 실패로 처리)
         validated_summary = Summary(**result)

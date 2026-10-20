@@ -1,5 +1,6 @@
 // 할 일(액션아이템)도 검색 기록과 마찬가지로 브라우저가 아니라 계정(백엔드 DB)에 귀속된다.
 // 저장 자체는 백엔드가 검색 시점에 자동으로 하므로, 여기서는 조회/상태토글/삭제만 담당한다.
+// teamId를 주면 그 팀이 공유하는 할 일 리스트를, 안 주면(기본값) 개인 리스트를 읽고 쓴다.
 import { apiFetch } from './apiClient';
 
 // 백엔드는 snake_case(due_date)로 주는데 프론트는 다른 곳(dueDate 등)과 맞춰 camelCase로 쓴다.
@@ -16,30 +17,29 @@ function toCamelCase(record) {
   };
 }
 
-// 실패를 빈 배열로 돌려주면 화면에서는 "할 일이 하나도 없다"와 구분이 안 된다 —
-// 목록이 통째로 사라진 것처럼 보이므로, 오류는 그대로 던지고 화면에서 처리하게 한다.
-export async function getAllActionItems() {
-  const rows = await apiFetch('/api/v1/action-items');
+export async function getAllActionItems(teamId) {
+  const qs = teamId ? `?team_id=${teamId}` : '';
+  const rows = await apiFetch(`/api/v1/action-items${qs}`);
   return rows.map(toCamelCase);
 }
 
-export async function toggleActionItemStatus(id) {
-  const rows = await apiFetch(`/api/v1/action-items/${id}`, { method: 'PATCH' });
+export async function toggleActionItemStatus(id, teamId) {
+  const qs = teamId ? `?team_id=${teamId}` : '';
+  const rows = await apiFetch(`/api/v1/action-items/${id}${qs}`, { method: 'PATCH' });
   return rows.map(toCamelCase);
 }
 
-// 검색 결과에 후보로 뜬 할 일 중 사용자가 직접 고른 것만 저장한다 — 예전엔 검색할 때마다
-// 전부 자동 저장돼서 테스트 검색까지 할 일 목록에 쌓였다.
-export async function saveActionItem(query, item) {
+export async function saveActionItem(query, item, teamId) {
   const rows = await apiFetch('/api/v1/action-items', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query, item }),
+    body: JSON.stringify({ query, item, team_id: teamId ?? null }),
   });
   return rows.map(toCamelCase);
 }
 
-export async function deleteActionItem(id) {
-  const rows = await apiFetch(`/api/v1/action-items/${id}`, { method: 'DELETE' });
+export async function deleteActionItem(id, teamId) {
+  const qs = teamId ? `?team_id=${teamId}` : '';
+  const rows = await apiFetch(`/api/v1/action-items/${id}${qs}`, { method: 'DELETE' });
   return rows.map(toCamelCase);
 }

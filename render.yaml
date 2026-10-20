@@ -1,0 +1,91 @@
+# Render Blueprint — https://render.com/docs/blueprint-spec
+#
+# 사용법: Render 대시보드 → New → Blueprint → 이 저장소(GitHub) 연결하면 아래 두 서비스가
+# 한 번에 만들어진다. "sync: false"로 표시된 환경변수는 민감 정보라 이 파일에 값을 적지
+# 않았다 — Blueprint 적용 후 Render 대시보드에서 각 서비스의 Environment 탭에 직접 입력해야
+# 한다(backend/.env.example·.env.example 참고해서 뭘 채워야 하는지 확인).
+#
+# 지금은 포트폴리오/데모 단계라 비용 없는 Free 플랜으로 둔다 — 영구 디스크가 없어서
+# 15분 비활동 후 슬립했다 깨어날 때마다 컨테이너가 새로 생성되며 app.db/chroma_db가
+# 초기화된다는 뜻이다. "써보는 것"(회원가입→연동→검색)은 매번 되지만, 미리 쌓아둔
+# 데모 데이터는 유지되지 않는다.
+#
+# ── 나중에 실사용(계속 유지되는 데이터 필요)으로 전환할 때 할 일 ──
+# 1. 아래 plan: free → plan: starter(또는 그 이상)로 변경
+# 2. 아래 주석 처리된 disk 블록의 주석을 해제
+# 3. DB_PATH=/data/app.db, CHROMA_PERSIST_DIR=/data/chroma_db 두 환경변수를 추가
+#    (backend/db.py·rag_pipeline.py가 이미 이 두 환경변수를 지원하므로 코드 수정은 불필요)
+
+services:
+  - type: web
+    name: topic-thread-backend
+    runtime: python
+    plan: free
+    region: singapore  # Render엔 한국/일본 리전이 없음 — 아시아 중 가장 가까운 곳
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    # --workers를 지정하지 않음(기본 1) — README.md "배포" 절 참고: 권한 확인 캐시와
+    # 동기화 진행 상태가 프로세스 메모리에만 있어서 워커를 늘리면 깨진다.
+    # disk:  # Free 플랜은 영구 디스크 미지원 — Starter 이상으로 올릴 때 주석 해제
+    #   name: data
+    #   mountPath: /data
+    #   sizeGB: 1
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: FRONTEND_ORIGINS
+        value: https://topic-thread-frontend.onrender.com
+      - key: SIGNUP_ALLOWED_DOMAINS
+        value: ""
+      - key: DAILY_SEARCH_LIMIT
+        value: "50"
+      - key: GOOGLE_OAUTH_CLIENT_ID
+        sync: false
+      - key: GOOGLE_OAUTH_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_OAUTH_REDIRECT_URI
+        value: https://topic-thread-backend.onrender.com/api/v1/auth/link/google/callback
+      - key: GITHUB_OAUTH_CLIENT_ID
+        sync: false
+      - key: GITHUB_OAUTH_CLIENT_SECRET
+        sync: false
+      - key: GITHUB_OAUTH_REDIRECT_URI
+        value: https://topic-thread-backend.onrender.com/api/v1/auth/link/github/callback
+      - key: GITLAB_OAUTH_CLIENT_ID
+        sync: false
+      - key: GITLAB_OAUTH_CLIENT_SECRET
+        sync: false
+      - key: GITLAB_OAUTH_REDIRECT_URI
+        value: https://topic-thread-backend.onrender.com/api/v1/auth/link/gitlab/callback
+      - key: SLACK_OAUTH_CLIENT_ID
+        sync: false
+      - key: SLACK_OAUTH_CLIENT_SECRET
+        sync: false
+      - key: SLACK_OAUTH_REDIRECT_URI
+        value: https://topic-thread-backend.onrender.com/api/v1/auth/link/slack/callback
+      - key: NOTION_OAUTH_CLIENT_ID
+        sync: false
+      - key: NOTION_OAUTH_CLIENT_SECRET
+        sync: false
+      - key: NOTION_OAUTH_REDIRECT_URI
+        value: https://topic-thread-backend.onrender.com/api/v1/auth/link/notion/callback
+      - key: LLM_BACKEND
+        value: openai
+
+  - type: web
+    name: topic-thread-frontend
+    runtime: static
+    rootDir: .
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
+    envVars:
+      - key: VITE_API_BASE
+        value: https://topic-thread-backend.onrender.com
+    routes:
+      # React Router 없이 클라이언트 사이드 라우팅은 안 쓰지만, 새로고침 시 404 방지용으로 둔다
+      - type: rewrite
+        source: /*
+        destination: /index.html

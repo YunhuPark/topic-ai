@@ -7,6 +7,7 @@ import AuthGate from './components/AuthGate';
 import ActionItemsView from './components/ActionItemsView';
 import { getToken, clearSession } from './utils/authStore';
 import { apiFetch, setUnauthorizedHandler } from './utils/apiClient';
+import { getCurrentTeamId, setCurrentTeamId } from './utils/teamStore';
 
 function App() {
   const [activeView, setActiveView] = useState('home');
@@ -17,6 +18,7 @@ function App() {
   const [selectedDoc, setSelectedDoc] = useState(null);
   const [documents, setDocuments] = useState([]);
   const [summary, setSummary] = useState(null);
+  const [searchTiming, setSearchTiming] = useState(null);
   const [stats, setStats] = useState(null);
   const [user, setUser] = useState(null);
   const [sessionNotice, setSessionNotice] = useState('');
@@ -26,18 +28,32 @@ function App() {
   const [slackLinkedLogin, setSlackLinkedLogin] = useState(null);
   const [notionLinkedLogin, setNotionLinkedLogin] = useState(null);
   const [sessionChecked, setSessionChecked] = useState(false);
+  // "현재 선택된 팀" — localStorage에 저장(authStore와 같은 패턴), null이면 개인 스코프.
+  const [currentTeamId, setCurrentTeamIdState] = useState(getCurrentTeamId());
 
-  // 통계는 "내가 연동해서 가져온 문서"만 집계하므로 로그인한 뒤에만 의미가 있다 —
-  // 그래서 마운트 시점이 아니라 세션이 확인된 뒤에 부른다.
+  const handleTeamChange = useCallback((teamId) => {
+    setCurrentTeamId(teamId);
+    setCurrentTeamIdState(teamId);
+  }, []);
+
+  // 통계는 "내가(또는 선택된 팀이) 연동해서 가져온 문서"만 집계하므로 로그인한 뒤에만
+  // 의미가 있다 — 그래서 마운트 시점이 아니라 세션이 확인된 뒤에 부른다.
   const fetchStats = useCallback(() => {
     if (!getToken()) return Promise.resolve(null);
-    return apiFetch('/api/v1/stats')
+    const qs = currentTeamId ? `?team_id=${currentTeamId}` : '';
+    return apiFetch(`/api/v1/stats${qs}`)
       .then((data) => {
         if (data) setStats(data);
         return data;
       })
       .catch(() => null);
-  }, []);
+  }, [currentTeamId]);
+
+  // 팀을 전환하면 그 스코프 기준으로 통계를 다시 불러온다.
+  useEffect(() => {
+    if (user) fetchStats();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentTeamId]);
 
   const fetchLinkedAccounts = useCallback(() => {
     if (!getToken()) return Promise.resolve(null);
@@ -96,7 +112,11 @@ function App() {
 
   const handleAuthenticated = useCallback((authedUser) => {
     setSessionNotice('');
+    // 로그인/회원가입 응답은 {token, email}뿐이라 user.id가 없다 — "내 팀 나가기"처럼
+    // 본인 user_id가 필요한 기능이 새로고침 전까지 깨지는 걸 막기 위해, 로그인 직후
+    // 페이지 새로고침 때와 동일하게 /auth/me로 전체 사용자 정보를 바로 채워 넣는다.
     setUser(authedUser);
+    apiFetch('/api/v1/auth/me').then((data) => { if (data) setUser(data); }).catch(() => {});
     fetchLinkedAccounts();
     fetchStats();
   }, [fetchLinkedAccounts, fetchStats]);
@@ -145,9 +165,11 @@ function App() {
     setActiveView('search');
 
     try {
-      const data = await apiFetch(`/api/v1/search?q=${encodeURIComponent(query)}`);
+      const teamQs = currentTeamId ? `&team_id=${currentTeamId}` : '';
+      const data = await apiFetch(`/api/v1/search?q=${encodeURIComponent(query)}${teamQs}`);
       setDocuments(data.documents);
       setSummary(data.summary);
+      setSearchTiming(data.timing || null);
       setHasSearched(true);
       // 연동이 끊긴 소스가 있으면 결과가 조용히 비는 대신 재연결을 안내한다
       if (data.disconnectedSources?.length) {
@@ -168,7 +190,7 @@ function App() {
     } finally {
       setIsSearching(false);
     }
-  }, []);
+  }, [currentTeamId]);
 
   const handleDocSelect = useCallback((doc) => {
     setSelectedDoc(doc);
@@ -176,7 +198,7 @@ function App() {
 
   const renderMainContent = () => {
     if (activeView === 'actions') {
-      return <ActionItemsView />;
+      return <ActionItemsView teamId={currentTeamId} />;
     }
 
     if (activeView === 'search') {
@@ -189,9 +211,11 @@ function App() {
           searchError={searchError}
           documents={documents}
           summary={summary}
+          searchTiming={searchTiming}
           selectedDoc={selectedDoc}
           onDocSelect={handleDocSelect}
           topics={stats?.topics}
+          teamId={currentTeamId}
         />
       );
     }
@@ -230,6 +254,8 @@ function App() {
         onSlackLinked={handleSlackLinked}
         notionLinkedLogin={notionLinkedLogin}
         onNotionLinked={handleNotionLinked}
+        currentTeamId={currentTeamId}
+        onTeamChange={handleTeamChange}
       />
       <main className="app__main">
         {renderMainContent()}

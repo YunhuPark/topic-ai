@@ -34,6 +34,15 @@ class Summary(BaseModel):
     decisionTrail: List[DecisionTrailItem]
     actionItems: List[ActionItem]
 
+class SearchTiming(BaseModel):
+    """검색 요청 한 번의 단계별 소요 시간(ms) — 실측 응답 속도를 보여주기 위한 계측치.
+    벡터 검색/재정렬, 소스별 실시간 권한 확인, LLM 요약 호출 세 단계가 전체 지연의 대부분을
+    차지해서, 이 셋을 각각 나눠 봐야 어디가 병목인지 알 수 있다."""
+    retrievalMs: int
+    permissionCheckMs: int
+    llmSummaryMs: int
+    totalMs: int
+
 class SearchResponse(BaseModel):
     documents: List[Document]
     summary: Summary
@@ -41,14 +50,16 @@ class SearchResponse(BaseModel):
     # 사라지는 대신 프론트가 재연결 안내를 띄울 수 있게 함께 내려준다.
     disconnectedSources: List[str] = []
     degradedSources: List[str] = []
+    timing: Optional[SearchTiming] = None
 
 class SummarizeDocumentRequest(BaseModel):
     # 검색 결과에서 문서 하나를 클릭했을 때 그 문서만 다시 요약하기 위한 요청 — 예전엔
     # 검색 결과 전체(최대 4개)를 합친 요약을 계속 보여줘서, 다른 문서를 클릭해도 무관한
-    # 내용이 "핵심 포인트"에 섞여 나왔다. 이미 검색 응답으로 받은 문서라 권한은 다시
-    # 확인하지 않는다(그 사람이 이미 본 결과이므로).
+    # 내용이 "핵심 포인트"에 섞여 나왔다. document는 id를 찾는 용도일 뿐 — 서버가 실제
+    # 문서를 다시 조회하고 권한도 재확인한다(클라이언트가 보낸 content는 신뢰하지 않음).
     query: str
     document: Document
+    team_id: Optional[int] = None
 
 class SourceCount(BaseModel):
     source: str
@@ -130,3 +141,36 @@ class SaveActionItemRequest(BaseModel):
     # user_id+query+source_item_id 조합이라서).
     query: str
     item: ActionItem
+    team_id: Optional[int] = None
+
+class PersonRecord(BaseModel):
+    id: int
+    display_name: str
+    aliases: list[str]
+    created_at: str
+
+class PersonCreateRequest(BaseModel):
+    display_name: str
+    aliases: list[str]
+    team_id: Optional[int] = None
+
+class TeamRecord(BaseModel):
+    id: int
+    name: str
+    role: str
+    createdAt: str
+
+class TeamCreateRequest(BaseModel):
+    name: str
+
+class TeamInviteResponse(BaseModel):
+    code: str
+
+class TeamJoinRequest(BaseModel):
+    code: str
+
+class TeamMemberRecord(BaseModel):
+    userId: int
+    email: str
+    role: str
+    joinedAt: str

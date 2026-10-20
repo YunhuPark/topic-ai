@@ -32,7 +32,7 @@ function SearchLoadingSkeleton() {
 
 export default function SearchView({
   onSearch, isSearching, hasSearched, searchQuery, searchError,
-  documents, summary, selectedDoc, onDocSelect, topics = [],
+  documents, summary, searchTiming, selectedDoc, onDocSelect, topics = [], teamId,
 }) {
   const [recentSearches, setRecentSearches] = useState([]);
 
@@ -74,7 +74,13 @@ export default function SearchView({
             <TopicThread documents={documents} onDocSelect={onDocSelect} selectedDoc={selectedDoc} />
           </div>
           <div className="app__results-right glass-panel">
-            <AISummaryPanel summary={summary} selectedDoc={selectedDoc} searchQuery={searchQuery} />
+            <AISummaryPanel
+              summary={summary}
+              selectedDoc={selectedDoc}
+              searchQuery={searchQuery}
+              teamId={teamId}
+              searchTiming={searchTiming}
+            />
           </div>
         </div>
       )}

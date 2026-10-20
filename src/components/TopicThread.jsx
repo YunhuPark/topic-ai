@@ -8,7 +8,7 @@ function DocumentCard({ doc, isSelected, onSelect }) {
 
   return (
     <div
-      className={`doc-card glass-panel-hover ${isSelected ? 'doc-card--selected' : ''}`}
+      className={`doc-card glass-panel glass-panel-hover ${isSelected ? 'doc-card--selected' : ''}`}
       onClick={() => onSelect(doc)}
     >
       <div className="doc-card__header">
