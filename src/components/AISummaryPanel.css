@@ -521,6 +521,62 @@
   to { transform: rotate(360deg); }
 }
 
+/* 할 일 리스트 화면(ActionItemsView) — 수동 추가 토글/폼 */
+.action-items__header-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.action-items__add-toggle {
+  background: none;
+  border: none;
+  color: var(--accent-secondary);
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0;
+}
+
+.action-items__add-toggle:hover {
+  text-decoration: underline;
+}
+
+.action-items__add-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  margin-bottom: var(--space-3);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+}
+
+.action-items__add-row {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.action-items__add-row .action-items__add-input {
+  flex: 1;
+}
+
+.action-items__add-input {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-default);
+  color: var(--text-primary);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2);
+  font-size: 0.8rem;
+  font-family: var(--font-sans);
+}
+
+.action-items__add-input:focus {
+  outline: none;
+  border-color: var(--accent-primary);
+}
+
 /* 할 일 리스트 화면(ActionItemsView) — 필터 탭 */
 .action-items__tabs {
   display: flex;
