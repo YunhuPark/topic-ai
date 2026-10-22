@@ -261,6 +261,27 @@ def auth_me(authorization: Optional[str] = Header(None)):
     return MeResponse(**user)
 
 
+@app.get("/api/v1/auth/google/start", response_model=AuthorizeUrlResponse)
+def google_login_start():
+    """이메일+비밀번호 대신 Google 계정으로 로그인/가입한다 — 로그인 전이라 인증 헤더가
+    없다는 점, Drive 접근 범위를 요구하지 않는다는 점이 아래 "Google Drive 연결"과 다르다."""
+    try:
+        url = auth.get_google_login_authorize_url()
+    except auth.AuthError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return AuthorizeUrlResponse(authorizeUrl=url)
+
+
+@app.get("/api/v1/auth/google/callback", response_class=HTMLResponse)
+def google_login_callback(code: str = "", state: str = ""):
+    result = auth.complete_google_login(code, state)
+    return _oauth_callback_html(
+        "google_login", result,
+        success_message="Google 로그인 완료! 이 창은 자동으로 닫힙니다...",
+        failure_prefix="로그인에 실패했습니다",
+    )
+
+
 @app.get("/api/v1/auth/link/google/start", response_model=AuthorizeUrlResponse)
 def link_google_start(authorization: Optional[str] = Header(None)):
     """Google도 이제 GitHub/GitLab과 같은 팝업+콜백 패턴이라, 이 구체적인 경로를 아래의
@@ -306,15 +327,18 @@ def get_linked(authorization: Optional[str] = Header(None)):
     return db.get_linked_accounts(user["id"])
 
 
-def _oauth_callback_html(provider: str, result: dict) -> str:
+def _oauth_callback_html(
+    provider: str, result: dict,
+    success_message: Optional[str] = None, failure_prefix: str = "연결에 실패했습니다",
+) -> str:
     payload = {"provider": provider, **result}
     # </script>가 섞인 값(제공자가 내려준 오류 문구, 표시 이름 등)이 스크립트 태그를 깨고 나오지
     # 않도록 이스케이프한다. 화면에 그대로 찍는 오류 문구도 HTML 이스케이프.
     message_json = json.dumps(payload).replace("<", "\\u003c").replace(">", "\\u003e")
     if result.get("ok"):
-        message = html.escape(f"{provider} 연결 완료! 이 창은 자동으로 닫힙니다...")
+        message = html.escape(success_message or f"{provider} 연결 완료! 이 창은 자동으로 닫힙니다...")
     else:
-        message = "연결에 실패했습니다: " + html.escape(result.get("error", ""))
+        message = f"{failure_prefix}: " + html.escape(result.get("error", ""))
     origins_json = json.dumps(FRONTEND_ORIGINS)
     return f"""
     <html><body style="background:#0a0b0f;color:#fff;font-family:sans-serif;

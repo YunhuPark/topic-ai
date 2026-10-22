@@ -48,6 +48,8 @@ services:
         sync: false
       - key: GOOGLE_OAUTH_REDIRECT_URI
         value: https://topic-thread-backend.onrender.com/api/v1/auth/link/google/callback
+      - key: GOOGLE_LOGIN_REDIRECT_URI
+        value: https://topic-thread-backend.onrender.com/api/v1/auth/google/callback
       - key: GITHUB_OAUTH_CLIENT_ID
         sync: false
       - key: GITHUB_OAUTH_CLIENT_SECRET

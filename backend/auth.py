@@ -178,6 +178,106 @@ def signup(email: str, password: str) -> tuple[str, str]:
     return _issue_token(user_id, email), email
 
 
+# ── Google 로그인(앱 자체 인증) ──────────────────────────────────────────
+# 아래 "Google Drive 연결"(link_google_account, GOOGLE_OAUTH_REDIRECT_URI)과는 완전히 별개다 —
+# 저건 이미 로그인한 계정에 Drive 읽기 권한을 추가로 붙이는 것이고, 이건 애초에 로그인 자체를
+# 이메일+비밀번호 대신 Google 계정으로 하는 것이다. 같은 Google OAuth 클라이언트(ID/시크릿)를
+# 재사용하되, 콜백 경로와 스코프(openid email만 — Drive 접근 범위 없음)를 분리해서 "로그인하려고
+# 눌렀는데 Drive 접근까지 한꺼번에 동의하라고 뜨는" 과한 동의 요청을 피한다.
+GOOGLE_LOGIN_REDIRECT_URI = os.getenv(
+    "GOOGLE_LOGIN_REDIRECT_URI", "http://localhost:8000/api/v1/auth/google/callback"
+)
+GOOGLE_LOGIN_SCOPE = "openid email"
+
+
+def get_google_login_authorize_url() -> str:
+    """로그인 흐름엔 아직 로그인된 계정이 없어 user_id가 없다 — 기존 oauth_states가
+    user_id를 요구하므로(FK 제약은 있지만 SQLite가 기본적으로 강제하지 않음) 0을
+    "아직 user_id 없음"을 나타내는 sentinel로 쓴다. provider 값도 "google_login"으로 구분해서
+    기존 Drive 연결(state.provider == "google")과 섞이지 않게 한다."""
+    client_id, _ = _google_oauth_config()
+    state = db.create_oauth_state(0, "google_login")
+    params = urllib.parse.urlencode({
+        "client_id": client_id,
+        "redirect_uri": GOOGLE_LOGIN_REDIRECT_URI,
+        "response_type": "code",
+        "scope": GOOGLE_LOGIN_SCOPE,
+        "state": state,
+    })
+    return f"https://accounts.google.com/o/oauth2/v2/auth?{params}"
+
+
+def _get_or_create_google_user(email: str) -> int:
+    """이메일이 이미 가입돼 있으면(이메일+비밀번호로 가입했던 계정이라도) 그 계정으로 로그인시킨다
+    — 같은 이메일이면 같은 사람으로 취급. 처음 보는 이메일이면 새로 만드는데, password_hash가
+    NOT NULL이라 비워둘 수 없어서 어떤 실제 비밀번호로도 절대 못 맞는 랜덤 해시를 채워 넣는다
+    (스키마 변경 없이 "비밀번호 로그인 경로를 막는다"는 의도를 표현하는 방법 — bcrypt.checkpw가
+    이 해시와는 무슨 비밀번호를 넣어도 항상 False를 반환한다)."""
+    conn = get_connection()
+    try:
+        row = conn.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
+        if row:
+            return row["id"]
+        unusable_hash = bcrypt.hashpw(os.urandom(32), bcrypt.gensalt()).decode("utf-8")
+        cur = conn.execute(
+            "INSERT INTO users (email, password_hash, created_at) VALUES (?, ?, ?)",
+            (email, unusable_hash, datetime.now(timezone.utc).isoformat()),
+        )
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def complete_google_login(code: str, state: str) -> dict:
+    """콜백에서 code+state를 받아 로그인(또는 최초라면 가입)을 완료하고 우리 JWT를 발급한다.
+    실패해도 예외 대신 dict로 반환한다 — 콜백 응답은 항상 postMessage용 HTML을 그려야 해서
+    (팝업 창이므로) 성공/실패 어느 쪽이든 화면을 보여줘야 하기 때문."""
+    pending = db.consume_oauth_state(state)
+    if not pending or pending["provider"] != "google_login":
+        return {"ok": False, "error": "유효하지 않거나 만료된 로그인 요청입니다."}
+
+    try:
+        client_id, client_secret = _google_oauth_config()
+    except AuthError as e:
+        return {"ok": False, "error": str(e)}
+
+    token_resp = http_requests.post(
+        "https://oauth2.googleapis.com/token",
+        data={
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "code": code,
+            "redirect_uri": GOOGLE_LOGIN_REDIRECT_URI,
+            "grant_type": "authorization_code",
+        },
+        timeout=10,
+    )
+    token_data = token_resp.json() if token_resp.ok else {}
+    access_token = token_data.get("access_token")
+    if not access_token:
+        return {"ok": False, "error": token_data.get("error_description", "Google 로그인에 실패했습니다.")}
+
+    resp = http_requests.get(
+        GOOGLE_USERINFO_URL, headers={"Authorization": f"Bearer {access_token}"}, timeout=10
+    )
+    if resp.status_code != 200:
+        return {"ok": False, "error": "Google 사용자 정보를 가져오지 못했습니다."}
+    info = resp.json()
+    email = info.get("email")
+    if not email:
+        return {"ok": False, "error": "Google 계정에서 이메일을 가져오지 못했습니다."}
+    # Google이 이메일 미인증 계정에도 email 필드를 내려줄 수 있어서 명시적으로 확인한다 —
+    # 여기서 자동 가입되는 계정은 비밀번호 검증이 아예 없는 만큼, 최소한 이메일 소유는
+    # Google이 보증한 것이어야 한다.
+    if info.get("email_verified") is False:
+        return {"ok": False, "error": "Google 계정의 이메일이 아직 인증되지 않았습니다."}
+    email = email.strip().lower()
+
+    user_id = _get_or_create_google_user(email)
+    return {"ok": True, "token": _issue_token(user_id, email), "email": email}
+
+
 def _check_login_lockout(email: str) -> None:
     with _login_attempts_lock:
         attempts, locked_until = _login_attempts.get(email, (0, 0.0))
