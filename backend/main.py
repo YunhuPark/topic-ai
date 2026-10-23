@@ -282,6 +282,26 @@ def google_login_callback(code: str = "", state: str = ""):
     )
 
 
+@app.get("/api/v1/auth/kakao/start", response_model=AuthorizeUrlResponse)
+def kakao_login_start():
+    """카카오 계정으로 로그인/가입 — Google 로그인과 같은 역할, 같은 패턴."""
+    try:
+        url = auth.get_kakao_login_authorize_url()
+    except auth.AuthError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return AuthorizeUrlResponse(authorizeUrl=url)
+
+
+@app.get("/api/v1/auth/kakao/callback", response_class=HTMLResponse)
+def kakao_login_callback(code: str = "", state: str = ""):
+    result = auth.complete_kakao_login(code, state)
+    return _oauth_callback_html(
+        "kakao_login", result,
+        success_message="카카오 로그인 완료! 이 창은 자동으로 닫힙니다...",
+        failure_prefix="로그인에 실패했습니다",
+    )
+
+
 @app.get("/api/v1/auth/link/google/start", response_model=AuthorizeUrlResponse)
 def link_google_start(authorization: Optional[str] = Header(None)):
     """Google도 이제 GitHub/GitLab과 같은 팝업+콜백 패턴이라, 이 구체적인 경로를 아래의

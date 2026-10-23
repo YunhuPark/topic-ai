@@ -278,6 +278,120 @@ def complete_google_login(code: str, state: str) -> dict:
     return {"ok": True, "token": _issue_token(user_id, email), "email": email}
 
 
+# ── 카카오 로그인(앱 자체 인증) ─────────────────────────────────────────
+# Google 로그인과 같은 역할(이메일+비밀번호 대신 소셜 계정으로 로그인)이지만, 카카오는
+# 이메일 동의항목이 "비즈 앱 전환" 없이는 막혀 있을 수 있어 이메일을 아예 못 받는 경우가
+# 흔하다 — 그래서 이메일이 아니라 카카오 고유 숫자 id를 진짜 식별자로 쓴다. 이메일을 받으면
+# 그 이메일로, 못 받으면 "kakao-{id}@no-email.topicthread.local" 형태의 가짜(수신 불가)
+# 이메일로 계정을 만든다 — users.email UNIQUE 제약을 그대로 쓰면서도 이메일 동의 여부와
+# 무관하게 항상 동작하게 하기 위함(스키마 변경 없음, Google 로그인의 "비밀번호 해시 무효화"
+# 트릭과 같은 결의 우회).
+KAKAO_CLIENT_ID = os.getenv("KAKAO_CLIENT_ID")
+KAKAO_CLIENT_SECRET = os.getenv("KAKAO_CLIENT_SECRET")
+KAKAO_LOGIN_REDIRECT_URI = os.getenv(
+    "KAKAO_LOGIN_REDIRECT_URI", "http://localhost:8000/api/v1/auth/kakao/callback"
+)
+
+
+def _kakao_oauth_config() -> tuple[str, str]:
+    if not KAKAO_CLIENT_ID or KAKAO_CLIENT_ID == "your_kakao_client_id_here":
+        raise AuthError("KAKAO_CLIENT_ID가 설정되지 않았습니다. backend/.env를 확인하세요.")
+    # Client Secret은 카카오 콘솔에서 선택 사항(비활성화도 가능)이라 비어 있어도 그냥 넘어간다 —
+    # 콘솔에서 활성화해놓고 안 보내면 카카오가 토큰 발급을 거부하므로, 값이 있으면 항상 같이 보낸다.
+    return KAKAO_CLIENT_ID, KAKAO_CLIENT_SECRET or ""
+
+
+def get_kakao_login_authorize_url() -> str:
+    client_id, _ = _kakao_oauth_config()
+    state = db.create_oauth_state(0, "kakao_login")
+    params = urllib.parse.urlencode({
+        "client_id": client_id,
+        "redirect_uri": KAKAO_LOGIN_REDIRECT_URI,
+        "response_type": "code",
+        "state": state,
+    })
+    return f"https://kauth.kakao.com/oauth/authorize?{params}"
+
+
+def _get_or_create_kakao_user(kakao_id: int, email: Optional[str]) -> int:
+    """이 카카오 id로 이미 로그인한 적 있으면(placeholder 이메일로 만들어둔 계정 포함) 그
+    계정을 그대로 쓴다. 처음이면 새로 만드는데, 이번에 진짜 이메일 동의를 받았고 그 이메일로
+    이미 가입된 계정(예: 일반 회원가입)이 있다면 새로 만들지 않고 거기로 합류시킨다 —
+    placeholder 이메일은 다른 가입 경로와 절대 겹치지 않으므로 이 분기는 진짜 이메일을 받은
+    경우에만 의미가 있다."""
+    placeholder_email = f"kakao-{kakao_id}@no-email.topicthread.local"
+    conn = get_connection()
+    try:
+        row = conn.execute("SELECT id FROM users WHERE email = ?", (placeholder_email,)).fetchone()
+        if row:
+            return row["id"]
+        if email:
+            row = conn.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
+            if row:
+                return row["id"]
+        unusable_hash = bcrypt.hashpw(os.urandom(32), bcrypt.gensalt()).decode("utf-8")
+        cur = conn.execute(
+            "INSERT INTO users (email, password_hash, created_at) VALUES (?, ?, ?)",
+            (email or placeholder_email, unusable_hash, datetime.now(timezone.utc).isoformat()),
+        )
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def complete_kakao_login(code: str, state: str) -> dict:
+    pending = db.consume_oauth_state(state)
+    if not pending or pending["provider"] != "kakao_login":
+        return {"ok": False, "error": "유효하지 않거나 만료된 로그인 요청입니다."}
+
+    try:
+        client_id, client_secret = _kakao_oauth_config()
+    except AuthError as e:
+        return {"ok": False, "error": str(e)}
+
+    token_req_data = {
+        "grant_type": "authorization_code",
+        "client_id": client_id,
+        "redirect_uri": KAKAO_LOGIN_REDIRECT_URI,
+        "code": code,
+    }
+    if client_secret:
+        token_req_data["client_secret"] = client_secret
+    token_resp = http_requests.post(
+        "https://kauth.kakao.com/oauth/token",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        data=token_req_data,
+        timeout=10,
+    )
+    token_data = token_resp.json() if token_resp.ok else {}
+    access_token = token_data.get("access_token")
+    if not access_token:
+        return {"ok": False, "error": token_data.get("error_description", "카카오 로그인에 실패했습니다.")}
+
+    resp = http_requests.get(
+        "https://kapi.kakao.com/v2/user/me",
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=10,
+    )
+    if resp.status_code != 200:
+        return {"ok": False, "error": "카카오 사용자 정보를 가져오지 못했습니다."}
+    info = resp.json()
+    kakao_id = info.get("id")
+    if not kakao_id:
+        return {"ok": False, "error": "카카오 계정 식별에 실패했습니다."}
+
+    kakao_account = info.get("kakao_account") or {}
+    email = kakao_account.get("email")
+    # 이메일 동의는 받았지만 인증되지 않은 이메일(드묾)은 신뢰하지 않는다.
+    if email and kakao_account.get("is_email_verified") is False:
+        email = None
+
+    user_id = _get_or_create_kakao_user(kakao_id, email)
+    final_email = email or f"kakao-{kakao_id}@no-email.topicthread.local"
+    return {"ok": True, "token": _issue_token(user_id, final_email), "email": final_email}
+
+
 def _check_login_lockout(email: str) -> None:
     with _login_attempts_lock:
         attempts, locked_until = _login_attempts.get(email, (0, 0.0))

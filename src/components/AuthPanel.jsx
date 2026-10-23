@@ -23,18 +23,20 @@ export default function AuthPanel({ onAuthenticated, variant = 'sidebar' }) {
 
   // 이메일+비밀번호와 구분되는 별도 경로 — 성공/실패 모두 postMessage로 받아서, 성공 시
   // handleSubmit의 성공 처리(saveSession + onAuthenticated)와 동일하게 마무리한다.
-  const handleGoogleLogin = async () => {
+  // Google/카카오 둘 다 서버 쪽 엔드포인트 이름(startPath)과 postMessage의 provider 값만
+  // 다를 뿐 흐름이 완전히 같아서 하나로 묶었다.
+  const handleSocialLogin = async (startPath, messageProvider, displayName, popupName) => {
     setError('');
     setLoading(true);
     setSlowHint(false);
     const slowTimer = setTimeout(() => setSlowHint(true), SLOW_REQUEST_HINT_DELAY_MS);
 
     try {
-      const startRes = await fetch(`${API_BASE}/api/v1/auth/google/start`);
+      const startRes = await fetch(`${API_BASE}${startPath}`);
       const startData = await startRes.json();
-      if (!startRes.ok) throw new Error(startData.detail || 'Google 로그인을 시작하지 못했습니다.');
+      if (!startRes.ok) throw new Error(startData.detail || `${displayName} 로그인을 시작하지 못했습니다.`);
 
-      const popup = window.open(startData.authorizeUrl, 'google-login', 'width=500,height=650');
+      const popup = window.open(startData.authorizeUrl, popupName, 'width=500,height=650');
       if (!popup) {
         throw new Error('팝업이 차단되었습니다. 팝업 차단을 해제해주세요.');
       }
@@ -48,7 +50,7 @@ export default function AuthPanel({ onAuthenticated, variant = 'sidebar' }) {
         };
         const handleMessage = (event) => {
           if (!TRUSTED_CALLBACK_ORIGINS.includes(event.origin)) return;
-          if (event.data?.provider !== 'google_login') return;
+          if (event.data?.provider !== messageProvider) return;
           settled = true;
           cleanup();
           if (event.data.ok) {
@@ -56,7 +58,7 @@ export default function AuthPanel({ onAuthenticated, variant = 'sidebar' }) {
             onAuthenticated({ email: event.data.email });
             resolve();
           } else {
-            reject(new Error(event.data.error || 'Google 로그인에 실패했습니다.'));
+            reject(new Error(event.data.error || `${displayName} 로그인에 실패했습니다.`));
           }
         };
         window.addEventListener('message', handleMessage);
@@ -199,11 +201,20 @@ export default function AuthPanel({ onAuthenticated, variant = 'sidebar' }) {
       <button
         type="button"
         className="auth-panel__google"
-        onClick={handleGoogleLogin}
+        onClick={() => handleSocialLogin('/api/v1/auth/google/start', 'google_login', 'Google', 'google-login')}
         disabled={loading}
       >
         <span className="auth-panel__google-icon" aria-hidden="true">G</span>
         Google로 계속하기
+      </button>
+      <button
+        type="button"
+        className="auth-panel__kakao"
+        onClick={() => handleSocialLogin('/api/v1/auth/kakao/start', 'kakao_login', '카카오', 'kakao-login')}
+        disabled={loading}
+      >
+        <span className="auth-panel__kakao-icon" aria-hidden="true">K</span>
+        카카오로 계속하기
       </button>
     </form>
   );
