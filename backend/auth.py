@@ -140,12 +140,16 @@ def _sync_after_link_background(provider: str, stored_token: str, user_id: int) 
     threading.Thread(target=_run, daemon=True).start()
 
 
+def _signup_allowed_domains() -> set[str]:
+    raw = os.getenv("SIGNUP_ALLOWED_DOMAINS", "")
+    return {d.strip().lower().lstrip("@") for d in raw.split(",") if d.strip()}
+
+
 def _check_signup_domain(email: str) -> None:
     """SIGNUP_ALLOWED_DOMAINS(.env, 콤마로 여러 개)가 설정돼 있으면 그 도메인의 이메일만
     가입을 허용한다. 설정 안 하면(기본값) 예전처럼 아무 이메일이나 가입 가능 — 사내 배포
     전에는 꼭 설정할 것을 권장하지만, 로컬 개발/테스트 흐름을 막지 않도록 기본은 무제한이다."""
-    raw = os.getenv("SIGNUP_ALLOWED_DOMAINS", "")
-    allowed = {d.strip().lower().lstrip("@") for d in raw.split(",") if d.strip()}
+    allowed = _signup_allowed_domains()
     if not allowed:
         return
     domain = email.rsplit("@", 1)[-1]
@@ -212,12 +216,18 @@ def _get_or_create_google_user(email: str) -> int:
     — 같은 이메일이면 같은 사람으로 취급. 처음 보는 이메일이면 새로 만드는데, password_hash가
     NOT NULL이라 비워둘 수 없어서 어떤 실제 비밀번호로도 절대 못 맞는 랜덤 해시를 채워 넣는다
     (스키마 변경 없이 "비밀번호 로그인 경로를 막는다"는 의도를 표현하는 방법 — bcrypt.checkpw가
-    이 해시와는 무슨 비밀번호를 넣어도 항상 False를 반환한다)."""
+    이 해시와는 무슨 비밀번호를 넣어도 항상 False를 반환한다).
+
+    신규 계정을 만들 때만 _check_signup_domain을 거친다(signup()과 동일한 원칙) — 안 그러면
+    SIGNUP_ALLOWED_DOMAINS를 설정해도 개인 Gmail로 소셜 로그인해서 그냥 우회해버릴 수 있다.
+    이미 만들어진 계정은 나중에 제한이 켜져도 계속 로그인 가능(기존 이메일+비밀번호 로그인과
+    동일한 동작 — signup()에서만 체크하고 login()에서는 안 함)."""
     conn = get_connection()
     try:
         row = conn.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
         if row:
             return row["id"]
+        _check_signup_domain(email)
         unusable_hash = bcrypt.hashpw(os.urandom(32), bcrypt.gensalt()).decode("utf-8")
         cur = conn.execute(
             "INSERT INTO users (email, password_hash, created_at) VALUES (?, ?, ?)",
@@ -274,7 +284,10 @@ def complete_google_login(code: str, state: str) -> dict:
         return {"ok": False, "error": "Google 계정의 이메일이 아직 인증되지 않았습니다."}
     email = email.strip().lower()
 
-    user_id = _get_or_create_google_user(email)
+    try:
+        user_id = _get_or_create_google_user(email)
+    except AuthError as e:
+        return {"ok": False, "error": str(e)}
     return {"ok": True, "token": _issue_token(user_id, email), "email": email}
 
 
@@ -318,7 +331,12 @@ def _get_or_create_kakao_user(kakao_id: int, email: Optional[str]) -> int:
     계정을 그대로 쓴다. 처음이면 새로 만드는데, 이번에 진짜 이메일 동의를 받았고 그 이메일로
     이미 가입된 계정(예: 일반 회원가입)이 있다면 새로 만들지 않고 거기로 합류시킨다 —
     placeholder 이메일은 다른 가입 경로와 절대 겹치지 않으므로 이 분기는 진짜 이메일을 받은
-    경우에만 의미가 있다."""
+    경우에만 의미가 있다.
+
+    신규 계정 생성 시에만 도메인 제한을 적용한다(Google과 동일한 원칙) — 진짜 이메일이 있으면
+    그 도메인을 검사하고, 없으면(placeholder로 갈 상황) 도메인 제한이 켜져 있는 한 아예 거부한다.
+    카카오 개인 계정은 회사 소속을 증명할 방법이 구조적으로 없어서, 이메일 동의조차 못 받은
+    상태로는 "회사 이메일만 가입 가능"이라는 제약을 지킬 수가 없기 때문이다."""
     placeholder_email = f"kakao-{kakao_id}@no-email.topicthread.local"
     conn = get_connection()
     try:
@@ -329,6 +347,13 @@ def _get_or_create_kakao_user(kakao_id: int, email: Optional[str]) -> int:
             row = conn.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
             if row:
                 return row["id"]
+        if email:
+            _check_signup_domain(email)
+        elif _signup_allowed_domains():
+            raise AuthError(
+                "도메인 제한이 설정된 상태라, 카카오 계정의 이메일 동의가 필요합니다. "
+                "이메일+비밀번호로 가입하거나 Google로 로그인해 주세요."
+            )
         unusable_hash = bcrypt.hashpw(os.urandom(32), bcrypt.gensalt()).decode("utf-8")
         cur = conn.execute(
             "INSERT INTO users (email, password_hash, created_at) VALUES (?, ?, ?)",
@@ -387,7 +412,10 @@ def complete_kakao_login(code: str, state: str) -> dict:
     if email and kakao_account.get("is_email_verified") is False:
         email = None
 
-    user_id = _get_or_create_kakao_user(kakao_id, email)
+    try:
+        user_id = _get_or_create_kakao_user(kakao_id, email)
+    except AuthError as e:
+        return {"ok": False, "error": str(e)}
     final_email = email or f"kakao-{kakao_id}@no-email.topicthread.local"
     return {"ok": True, "token": _issue_token(user_id, final_email), "email": final_email}
 
