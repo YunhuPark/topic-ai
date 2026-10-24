@@ -55,14 +55,6 @@ export default function Dashboard({ onSearchTopic, onSyncNow, stats, user }) {
           <p className="dashboard__hero-subtitle">
             오늘도 흩어진 지식을 하나로 연결해드릴게요
           </p>
-          <div className="dashboard__sync">
-            <button className="dashboard__sync-button" onClick={handleSyncClick} disabled={syncing}>
-              {syncing ? '요청 중...' : '🔄 지금 동기화'}
-            </button>
-            <span className="dashboard__sync-note">
-              {syncMessage || '새 문서는 15분마다 자동 반영돼요.'}
-            </span>
-          </div>
         </div>
         <div className="dashboard__hero-stats">
           <div className="dashboard__stat">
@@ -108,7 +100,16 @@ export default function Dashboard({ onSearchTopic, onSyncNow, stats, user }) {
         <div className="dashboard__card glass-panel animate-fade-in-up delay-3">
           <div className="dashboard__card-header">
             <h2 className="dashboard__card-title">🔔 최근 추가된 문서</h2>
+            <button
+              className="dashboard__sync-button"
+              onClick={handleSyncClick}
+              disabled={syncing}
+              title="새 문서는 15분마다 자동 반영돼요. 지금 바로 가져오려면 누르세요."
+            >
+              {syncing ? '요청 중...' : '🔄 지금 동기화'}
+            </button>
           </div>
+          {syncMessage && <p className="dashboard__sync-note">{syncMessage}</p>}
           <div className="dashboard__notification-list">
             {topics.length === 0 && (
               <p className="dashboard__empty">아직 추가된 문서가 없습니다.</p>
