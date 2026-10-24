@@ -150,7 +150,14 @@ export default function PopupLinkPanel({ provider, displayName, icon, linkedLogi
       )}
       {/* 연동 전후 상관없이 항상 보여야 하는 소스별 고정 안내(예: Notion의 개별 공유 필요
           안내) — 동기화 진행 상황 안내와 달리 justLinked 상태에 묶이지 않는다. */}
-      {note && <p className="google-link__hint">{note}</p>}
+      {note && (
+        <div className="google-link__hint">
+          {note.title && <p className="google-link__hint-title">{note.title}</p>}
+          <ol className="google-link__steps">
+            {note.steps.map((step) => <li key={step}>{step}</li>)}
+          </ol>
+        </div>
+      )}
       {justLinked && syncInfo?.status === 'done' && (
         <p className="google-link__hint">
           ✅ 동기화 완료 — {syncInfo.lastCount > 0 ? `새 문서 ${syncInfo.lastCount}개를 가져왔어요.` : '가져온 문서 중 바뀐 내용은 없었어요.'}
@@ -162,10 +169,13 @@ export default function PopupLinkPanel({ provider, displayName, icon, linkedLogi
         </p>
       )}
       {justLinked && (!syncInfo || syncInfo.status === 'running') && (
-        <p className="google-link__hint">
-          문서를 백그라운드에서 가져오는 중이에요 — 양이 많으면 몇 분 걸릴 수 있어요.
-          가져오는 대로 홈 화면 문서 수가 자동으로 올라갑니다.
-        </p>
+        <div className="google-link__hint">
+          <p className="google-link__hint-title">문서를 가져오는 중이에요</p>
+          <ul className="google-link__bullets">
+            <li>양이 많으면 몇 분 걸릴 수 있어요.</li>
+            <li>가져오는 대로 홈 화면의 문서 수가 올라갑니다.</li>
+          </ul>
+        </div>
       )}
       {error && <p className="google-link__error">{error}</p>}
     </div>

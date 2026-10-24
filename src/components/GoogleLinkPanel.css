@@ -89,6 +89,27 @@
   line-height: 1.4;
 }
 
+.google-link__hint-title {
+  margin: 0 0 0.25rem;
+  font-weight: 600;
+}
+
+.google-link__steps,
+.google-link__bullets {
+  margin: 0;
+  padding-left: 1.1rem;
+}
+
+.google-link__steps li,
+.google-link__bullets li {
+  padding-left: 0.1rem;
+  margin-bottom: 0.2rem;
+}
+
+.google-link__bullets {
+  list-style: disc;
+}
+
 .google-link__error {
   font-size: 0.68rem;
   color: var(--danger);

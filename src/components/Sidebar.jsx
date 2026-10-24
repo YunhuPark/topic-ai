@@ -221,7 +221,14 @@ export default function Sidebar({
                   <PopupLinkPanel
                     provider="notion" displayName="Notion" icon="📓"
                     linkedLogin={notionLinkedLogin} onLinked={onNotionLinked} onUnlinked={onUnlinked}
-                    note="⚠️ Notion은 새 페이지·데이터베이스를 만들 때마다 그 문서를 열어 '···' → 연결 추가로 직접 공유해야 검색에 나와요(Notion API 자체의 제약). 팀 문서용 상위 페이지 하나만 공유해두면, 그 아래 새로 만드는 문서는 자동으로 같이 공유됩니다."
+                    note={{
+                      title: '⚠️ 검색에 나오게 하려면 공유가 필요해요',
+                      steps: [
+                        '공유할 Notion 페이지를 엽니다.',
+                        "오른쪽 위 '···' → '연결 추가'에서 이 앱을 선택합니다.",
+                        '팀 문서용 상위 페이지 하나만 공유하면, 그 아래 새 문서는 자동으로 공유돼요.',
+                      ],
+                    }}
                   />
                 </div>
               )}
