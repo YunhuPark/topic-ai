@@ -342,6 +342,17 @@ def _get_or_create_kakao_user(kakao_id: int, email: Optional[str]) -> int:
     try:
         row = conn.execute("SELECT id FROM users WHERE email = ?", (placeholder_email,)).fetchone()
         if row:
+            if email:
+                # placeholder로 가입했던 사람이 이번엔 진짜 이메일 동의를 받았다 —
+                # 화면에 계속 가짜 이메일이 보이지 않도록 승격한다. 그 진짜 이메일을 이미
+                # 다른 계정(예: 일반 회원가입)이 쓰고 있으면 UNIQUE 충돌이 나므로, 그때는
+                # 승격하지 않고 기존 placeholder 그대로 둔다(계정 병합은 범위 밖).
+                clash = conn.execute(
+                    "SELECT id FROM users WHERE email = ? AND id != ?", (email, row["id"])
+                ).fetchone()
+                if not clash:
+                    conn.execute("UPDATE users SET email = ? WHERE id = ?", (email, row["id"]))
+                    conn.commit()
             return row["id"]
         if email:
             row = conn.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
