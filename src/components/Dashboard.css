@@ -367,3 +367,31 @@
   font-size: 0.875rem;
   padding: var(--space-4) 0;
 }
+
+.dashboard__sync {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-top: 0.9rem;
+}
+
+.dashboard__sync-button {
+  padding: 0.45rem 0.9rem;
+  border: 1px solid var(--border, rgba(0, 0, 0, 0.12));
+  border-radius: 999px;
+  background: #fff;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.dashboard__sync-button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.dashboard__sync-note {
+  font-size: 0.72rem;
+  color: var(--text-tertiary);
+}

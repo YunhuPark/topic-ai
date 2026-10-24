@@ -91,40 +91,71 @@ AUTO_RESYNC_PROVIDERS = ["google", "github", "gitlab", "slack", "notion"]
 AUTO_RESYNC_INTERVAL_SECONDS = int(os.getenv("AUTO_RESYNC_INTERVAL_SECONDS", "900"))
 
 
+async def _resync_accounts(accounts: list[dict], label: str):
+    for acc in accounts:
+        user_id, provider = acc["user_id"], acc["provider"]
+        try:
+            stored_token = acc["access_token"]
+            # google은 linked_accounts에 refresh_token을 저장해두므로, 실제 수집에 쓸
+            # 짧은 수명 access_token을 그때그때 새로 발급받아야 한다 (블로킹 HTTP 호출이라
+            # 이벤트 루프를 막지 않도록 스레드로 돌린다).
+            if provider == "google":
+                stored_token = await asyncio.to_thread(auth.refresh_google_access_token, stored_token)
+            try:
+                count = await asyncio.to_thread(
+                    rag_pipeline.sync_documents_for_user, provider, stored_token, user_id
+                )
+            except Exception as e:
+                # 토큰 만료(401)면 refresh_token으로 한 번 갱신해서 재시도한다 —
+                # GitLab access token은 기본 2시간이면 만료되므로 이게 없으면 연동이 곧 죽는다.
+                if "401" not in str(e):
+                    raise
+                refreshed = await asyncio.to_thread(
+                    auth.refresh_provider_access_token, user_id, provider
+                )
+                if not refreshed:
+                    raise
+                print(f"[{label}] user_id={user_id} provider={provider} 토큰 갱신 후 재시도")
+                count = await asyncio.to_thread(
+                    rag_pipeline.sync_documents_for_user, provider, refreshed, user_id
+                )
+            print(f"[{label}] user_id={user_id} provider={provider} 새 임베딩 {count}개")
+        except Exception as e:
+            print(f"[{label} 실패] user_id={user_id} provider={provider}: {e}")
+
+
 async def _auto_resync_loop():
     while True:
         await asyncio.sleep(AUTO_RESYNC_INTERVAL_SECONDS)
-        accounts = db.get_all_accounts_with_tokens(AUTO_RESYNC_PROVIDERS)
-        for acc in accounts:
-            user_id, provider = acc["user_id"], acc["provider"]
-            try:
-                stored_token = acc["access_token"]
-                # google은 linked_accounts에 refresh_token을 저장해두므로, 실제 수집에 쓸
-                # 짧은 수명 access_token을 그때그때 새로 발급받아야 한다 (블로킹 HTTP 호출이라
-                # 이벤트 루프를 막지 않도록 스레드로 돌린다).
-                if provider == "google":
-                    stored_token = await asyncio.to_thread(auth.refresh_google_access_token, stored_token)
-                try:
-                    count = await asyncio.to_thread(
-                        rag_pipeline.sync_documents_for_user, provider, stored_token, user_id
-                    )
-                except Exception as e:
-                    # 토큰 만료(401)면 refresh_token으로 한 번 갱신해서 재시도한다 —
-                    # GitLab access token은 기본 2시간이면 만료되므로 이게 없으면 연동이 곧 죽는다.
-                    if "401" not in str(e):
-                        raise
-                    refreshed = await asyncio.to_thread(
-                        auth.refresh_provider_access_token, user_id, provider
-                    )
-                    if not refreshed:
-                        raise
-                    print(f"[자동 재동기화] user_id={user_id} provider={provider} 토큰 갱신 후 재시도")
-                    count = await asyncio.to_thread(
-                        rag_pipeline.sync_documents_for_user, provider, refreshed, user_id
-                    )
-                print(f"[자동 재동기화] user_id={user_id} provider={provider} 새 임베딩 {count}개")
-            except Exception as e:
-                print(f"[자동 재동기화 실패] user_id={user_id} provider={provider}: {e}")
+        await _resync_accounts(db.get_all_accounts_with_tokens(AUTO_RESYNC_PROVIDERS), "자동 재동기화")
+
+
+# 사용자가 "지금 동기화"를 연타해도 같은 소스 수집이 겹쳐 돌지 않도록 사용자별로 막는다.
+_manual_sync_running: set[int] = set()
+
+
+@app.post("/api/v1/sync-now")
+async def sync_now(authorization: Optional[str] = Header(None)):
+    """15분 주기를 기다리지 않고, 로그인한 사용자의 연동 소스를 지금 바로 다시 수집한다.
+    수집은 백그라운드로 돌고 바로 응답한다 — 진행 상황은 /api/v1/sync-status로 본다."""
+    user = _require_user(authorization)
+    if user["id"] in _manual_sync_running:
+        return {"started": False, "reason": "already_running"}
+    accounts = [
+        a for a in db.get_all_accounts_with_tokens(AUTO_RESYNC_PROVIDERS) if a["user_id"] == user["id"]
+    ]
+    if not accounts:
+        return {"started": False, "reason": "no_accounts"}
+
+    async def run():
+        try:
+            await _resync_accounts(accounts, "수동 동기화")
+        finally:
+            _manual_sync_running.discard(user["id"])
+
+    _manual_sync_running.add(user["id"])
+    asyncio.create_task(run())
+    return {"started": True, "providers": [a["provider"] for a in accounts]}
 
 
 @app.on_event("startup")

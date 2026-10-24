@@ -3,9 +3,31 @@ import './Dashboard.css';
 import { sourceConfig } from '../data/mockData';
 import { countSearchesSince, getRecentSearches } from '../utils/searchHistory';
 
-export default function Dashboard({ onSearchTopic, stats, user }) {
+const SYNC_MESSAGES = {
+  started: '동기화를 시작했어요. 문서 수가 곧 올라갑니다.',
+  already_running: '이미 동기화 중이에요.',
+  no_accounts: '연동된 소스가 없어요. 사이드바에서 먼저 연결해 주세요.',
+  error: '동기화를 시작하지 못했어요. 잠시 후 다시 시도해 주세요.',
+};
+
+export default function Dashboard({ onSearchTopic, onSyncNow, stats, user }) {
   const [recentSearches, setRecentSearches] = useState([]);
   const [searchesThisWeek, setSearchesThisWeek] = useState(0);
+  const [syncing, setSyncing] = useState(false);
+  const [syncMessage, setSyncMessage] = useState('');
+
+  const handleSyncClick = async () => {
+    setSyncing(true);
+    setSyncMessage('');
+    try {
+      const res = await onSyncNow();
+      setSyncMessage(SYNC_MESSAGES[res?.started ? 'started' : res?.reason] ?? SYNC_MESSAGES.error);
+    } catch {
+      setSyncMessage(SYNC_MESSAGES.error);
+    } finally {
+      setSyncing(false);
+    }
+  };
 
   useEffect(() => {
     getRecentSearches().then(setRecentSearches);
@@ -33,6 +55,14 @@ export default function Dashboard({ onSearchTopic, stats, user }) {
           <p className="dashboard__hero-subtitle">
             오늘도 흩어진 지식을 하나로 연결해드릴게요
           </p>
+          <div className="dashboard__sync">
+            <button className="dashboard__sync-button" onClick={handleSyncClick} disabled={syncing}>
+              {syncing ? '요청 중...' : '🔄 지금 동기화'}
+            </button>
+            <span className="dashboard__sync-note">
+              {syncMessage || '새 문서는 15분마다 자동 반영돼요.'}
+            </span>
+          </div>
         </div>
         <div className="dashboard__hero-stats">
           <div className="dashboard__stat">

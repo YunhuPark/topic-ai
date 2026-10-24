@@ -138,6 +138,13 @@ function App() {
     }, 5000);
   }, [fetchStats]);
 
+  // "지금 동기화": 15분 주기를 기다리지 않고 서버에 재수집을 시키고, 끝날 때까지 통계를 재조회한다
+  const handleSyncNow = useCallback(async () => {
+    const res = await apiFetch('/api/v1/sync-now', { method: 'POST' });
+    if (res?.started) pollStatsAfterLink();
+    return res;
+  }, [pollStatsAfterLink]);
+
   // 연동 성공 시 공통 처리: 표시 이름 갱신 + 통계 즉시/주기적 재조회
   const afterLink = useCallback((setter, login) => {
     setter(login);
@@ -221,7 +228,7 @@ function App() {
     }
 
     // 홈: 통계/최근 문서/최근 검색/지식 건강도를 가볍게 훑어보는 화면 (검색은 별도 메뉴)
-    return <Dashboard onSearchTopic={handleSearch} stats={stats} user={user} />;
+    return <Dashboard onSearchTopic={handleSearch} onSyncNow={handleSyncNow} stats={stats} user={user} />;
   };
 
   if (!sessionChecked) {
