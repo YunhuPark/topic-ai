@@ -35,7 +35,7 @@ from pypdf import PdfReader
 load_dotenv()
 
 SLACK_API_BASE = "https://slack.com/api"
-SLACK_LOOKBACK_DAYS = 30
+SLACK_LOOKBACK_DAYS = int(os.getenv("SLACK_LOOKBACK_DAYS", "365"))
 
 # Slack이 "@이름" 자동완성 멘션을 실제 메시지 텍스트에 <@U0123ABC>(사용자 ID) 형태로 저장해서,
 # 해석 안 하고 그대로 두면 LLM 입장에선 의미 없는 토큰이라 담당자 추론에 전혀 쓸 수 없다.

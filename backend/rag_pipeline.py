@@ -614,7 +614,20 @@ def get_sync_status(user_id: int) -> dict[str, dict]:
         return {provider: dict(v) for (uid, provider), v in _sync_status.items() if uid == user_id}
 
 
+# 동시에 도는 동기화 수 제한 — 5개 소스가 한꺼번에 수집+임베딩하면 메모리가 작은 인스턴스(Render
+# Free 512MB)에서 프로세스가 죽고 재시작된다(그러면 진행 상태·연동 데이터가 날아간다).
+MAX_CONCURRENT_SYNCS = int(os.getenv("MAX_CONCURRENT_SYNCS", "1"))
+_sync_slots = threading.BoundedSemaphore(MAX_CONCURRENT_SYNCS)
+
+
 def sync_documents_for_user(provider: str, access_token: str, user_id: Optional[int] = None) -> int:
+    if user_id is not None:
+        _set_sync_status(user_id, provider, status="running", phase="queued", done=None, total=None)
+    with _sync_slots:
+        return _sync_documents_for_user(provider, access_token, user_id)
+
+
+def _sync_documents_for_user(provider: str, access_token: str, user_id: Optional[int] = None) -> int:
     """계정을 연동한 사람 본인의 access token으로, 그 사람이 실제 접근 가능한 문서 전체를
     가져와 Vector DB에 반영한다. API 서버와 같은 프로세스 안에서 바로 실행되므로, 오프라인
     스크립트와 달리 서버 재시작 없이 바로 검색에 반영된다.

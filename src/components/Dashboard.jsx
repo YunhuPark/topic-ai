@@ -22,10 +22,11 @@ function syncProgress(item) {
   if (item.phase === 'embedding' && item.total) {
     return { state: 'running', value: Math.round((item.done / item.total) * 100), text: `${item.done}/${item.total}` };
   }
+  if (item.phase === 'queued') return { state: 'running', value: 0, text: '대기 중' };
   return { state: 'running', value: null, text: '문서 확인 중' };
 }
 
-export default function Dashboard({ onSearchTopic, onSyncNow, onRefreshStats, stats, user }) {
+export default function Dashboard({ onSearchTopic, onSyncNow, onRefreshStats, linkedCount, stats, user }) {
   const [recentSearches, setRecentSearches] = useState([]);
   const [searchesThisWeek, setSearchesThisWeek] = useState(0);
   const [syncing, setSyncing] = useState(false);
@@ -74,7 +75,8 @@ export default function Dashboard({ onSearchTopic, onSyncNow, onRefreshStats, st
   }, []);
 
   const totalDocuments = stats?.totalDocuments ?? 0;
-  const connectedSources = stats?.connectedSources ?? 0;
+  // 연동 직후엔 문서가 아직 0개라 stats.connectedSources(문서가 있는 소스 수)가 0이므로, 실제 연동 수를 쓴다
+  const connectedSources = linkedCount ?? stats?.connectedSources ?? 0;
   const topics = stats?.topics ?? [];
   const freshness = stats?.freshness ?? { fresh: 0, moderate: 0, stale: 0 };
   const freshnessTotal = freshness.fresh + freshness.moderate + freshness.stale;
