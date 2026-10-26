@@ -245,7 +245,14 @@ def content_hash(title: str, content: str) -> str:
     return hashlib.sha256(f"{title}\n{content}".encode("utf-8")).hexdigest()
 
 
-def ingest_documents(source_docs: list[dict], synced_by_user_id: Optional[int] = None) -> int:
+EMBED_BATCH_SIZE = 20  # 진행률을 보여주려고 임베딩을 이 크기로 나눠서 넣는다
+
+
+def ingest_documents(
+    source_docs: list[dict],
+    synced_by_user_id: Optional[int] = None,
+    on_progress=None,
+) -> int:
     """공통 문서 포맷(dict) 리스트를 임베딩해 Vector DB에 적재하고, **실제로 임베딩한 문서 수**를
     반환한다 (내용이 그대로인 문서는 임베딩을 건너뛰므로 0일 수 있다).
 
@@ -255,6 +262,8 @@ def ingest_documents(source_docs: list[dict], synced_by_user_id: Optional[int] =
     synced_by_user_id를 주면 "이 문서를 가져온 사람" 목록(syncedBy)에 그 사용자를 추가한다.
     같은 저장소를 여러 사람이 연동할 수 있으므로 덮어쓰지 않고 기존 목록과 합친다. 이 값이
     대시보드 통계 범위 제한과 연동 해제 시 정리의 기준이 된다.
+
+    on_progress(done, total)를 주면 임베딩할 청크 수(total)가 정해진 뒤 배치마다 호출한다.
     """
     if not source_docs:
         return 0
@@ -358,7 +367,14 @@ def ingest_documents(source_docs: list[dict], synced_by_user_id: Optional[int] =
         # add_documents(ids=...)는 내부적으로 Chroma의 upsert를 쓰므로 같은 id로 다시 넣으면
         # 덮어쓴다 — 예전엔 먼저 delete를 했는데, 임베딩이 도는 수초~수분 동안 그 문서들이
         # 검색에서 사라지는 구간이 생겨서 없앴다.
-        vectorstore.add_documents(docs_to_embed, ids=ids_to_embed)
+        total_chunks = len(docs_to_embed)
+        if on_progress:
+            on_progress(0, total_chunks)
+        for start in range(0, total_chunks, EMBED_BATCH_SIZE):
+            end = start + EMBED_BATCH_SIZE
+            vectorstore.add_documents(docs_to_embed[start:end], ids=ids_to_embed[start:end])
+            if on_progress:
+                on_progress(min(end, total_chunks), total_chunks)
         print(f"문서 {len(embedded_base_ids)}개({len(docs_to_embed)}개 청크)를 새로 임베딩했습니다 "
               f"(변경 없음: {len(source_docs) - len(embedded_base_ids)}개).")
 
@@ -595,13 +611,20 @@ def sync_documents_for_user(provider: str, access_token: str, user_id: Optional[
         return 0
 
     if user_id is not None:
-        _set_sync_status(user_id, provider, status="running", startedAt=datetime.now(timezone.utc).isoformat())
+        _set_sync_status(
+            user_id, provider, status="running", phase="fetching", done=None, total=None,
+            startedAt=datetime.now(timezone.utc).isoformat(),
+        )
 
     try:
         source = PROVIDER_SOURCES.get(provider, provider)
         known = _known_documents(source, user_id)
         docs, seen_ids = fetcher(access_token, known)
-        embedded = ingest_documents(docs, synced_by_user_id=user_id)
+        on_progress = None
+        if user_id is not None:
+            def on_progress(done, total):
+                _set_sync_status(user_id, provider, phase="embedding", done=done, total=total)
+        embedded = ingest_documents(docs, synced_by_user_id=user_id, on_progress=on_progress)
 
         if user_id is not None:
             missing = [doc_id for doc_id in known if doc_id not in seen_ids]
@@ -619,14 +642,14 @@ def sync_documents_for_user(provider: str, access_token: str, user_id: Optional[
     except Exception as e:
         if user_id is not None:
             _set_sync_status(
-                user_id, provider, status="error", error=str(e),
+                user_id, provider, status="error", phase=None, error=str(e),
                 finishedAt=datetime.now(timezone.utc).isoformat(),
             )
         raise  # 호출자(연동 직후 백그라운드 스레드, 자동 재동기화 루프)가 그대로 처리하던 대로 유지
     else:
         if user_id is not None:
             _set_sync_status(
-                user_id, provider, status="done", lastCount=embedded, error=None,
+                user_id, provider, status="done", phase=None, lastCount=embedded, error=None,
                 finishedAt=datetime.now(timezone.utc).isoformat(),
             )
         return embedded

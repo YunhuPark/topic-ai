@@ -121,6 +121,9 @@ class SyncStatusItem(BaseModel):
     finishedAt: Optional[str] = None
     lastCount: Optional[int] = None
     error: Optional[str] = None
+    phase: Optional[str] = None  # "fetching"(원본에서 목록 수집) | "embedding"(임베딩 중)
+    done: Optional[int] = None
+    total: Optional[int] = None
 
 class SyncStatusResponse(BaseModel):
     items: List[SyncStatusItem]

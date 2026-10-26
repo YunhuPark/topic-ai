@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import './Dashboard.css';
 import { sourceConfig } from '../data/mockData';
 import { countSearchesSince, getRecentSearches } from '../utils/searchHistory';
+import { apiFetch } from '../utils/apiClient';
 
 const SYNC_MESSAGES = {
   started: '동기화를 시작했어요. 문서 수가 곧 올라갑니다.',
@@ -10,11 +11,48 @@ const SYNC_MESSAGES = {
   error: '동기화를 시작하지 못했어요. 잠시 후 다시 시도해 주세요.',
 };
 
-export default function Dashboard({ onSearchTopic, onSyncNow, stats, user }) {
+const PROVIDER_LABELS = { google: 'Google Drive', github: 'GitHub', gitlab: 'GitLab', slack: 'Slack', notion: 'Notion' };
+
+// 소스 하나의 진행 상태 → 막대 모양(value: 0~100 또는 null=전체 개수를 아직 모름)과 오른쪽 문구
+function syncProgress(item) {
+  if (item.status === 'error') return { state: 'error', value: 100, text: '실패' };
+  if (item.status === 'done') {
+    return { state: 'done', value: 100, text: item.lastCount > 0 ? `${item.lastCount}개 가져옴` : '최신 상태' };
+  }
+  if (item.phase === 'embedding' && item.total) {
+    return { state: 'running', value: Math.round((item.done / item.total) * 100), text: `${item.done}/${item.total}` };
+  }
+  return { state: 'running', value: null, text: '문서 확인 중' };
+}
+
+export default function Dashboard({ onSearchTopic, onSyncNow, onRefreshStats, stats, user }) {
   const [recentSearches, setRecentSearches] = useState([]);
   const [searchesThisWeek, setSearchesThisWeek] = useState(0);
   const [syncing, setSyncing] = useState(false);
   const [syncMessage, setSyncMessage] = useState('');
+  const [syncItems, setSyncItems] = useState([]);
+  const [watching, setWatching] = useState(true);  // 처음 한 번은 이미 진행 중인 동기화가 있는지 확인
+
+  // 동기화가 도는 동안 2초마다 소스별 진행 상황을 읽고, 문서 수도 같이 갱신한다.
+  useEffect(() => {
+    if (!watching) return undefined;
+    let stopped = false;
+    const tick = async () => {
+      try {
+        const data = await apiFetch('/api/v1/sync-status');
+        if (stopped) return;
+        const items = data?.items ?? [];
+        setSyncItems(items);
+        onRefreshStats?.();
+        if (!items.some((i) => i.status === 'running')) setWatching(false);
+      } catch {
+        if (!stopped) setWatching(false);
+      }
+    };
+    tick();
+    const timer = setInterval(tick, 2000);
+    return () => { stopped = true; clearInterval(timer); };
+  }, [watching, onRefreshStats]);
 
   const handleSyncClick = async () => {
     setSyncing(true);
@@ -22,6 +60,7 @@ export default function Dashboard({ onSearchTopic, onSyncNow, stats, user }) {
     try {
       const res = await onSyncNow();
       setSyncMessage(SYNC_MESSAGES[res?.started ? 'started' : res?.reason] ?? SYNC_MESSAGES.error);
+      if (res?.started || res?.reason === 'already_running') setWatching(true);
     } catch {
       setSyncMessage(SYNC_MESSAGES.error);
     } finally {
@@ -110,6 +149,35 @@ export default function Dashboard({ onSearchTopic, onSyncNow, stats, user }) {
             </button>
           </div>
           {syncMessage && <p className="dashboard__sync-note">{syncMessage}</p>}
+          {syncItems.length > 0 && (
+            <ul className="dashboard__sync-list">
+              {syncItems.map((item) => {
+                const p = syncProgress(item);
+                return (
+                  <li key={item.provider} className={`dashboard__sync-row dashboard__sync-row--${p.state}`}>
+                    <div className="dashboard__sync-row-head">
+                      <span>{PROVIDER_LABELS[item.provider] ?? item.provider}</span>
+                      <span className="dashboard__sync-row-text">
+                        {p.value !== null && p.state === 'running' ? `${p.value}% · ` : ''}{p.text}
+                      </span>
+                    </div>
+                    <div
+                      className="dashboard__progress"
+                      role="progressbar"
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                      aria-valuenow={p.value ?? undefined}
+                    >
+                      <div
+                        className={`dashboard__progress-fill ${p.value === null ? 'dashboard__progress-fill--indeterminate' : ''}`}
+                        style={p.value === null ? undefined : { width: `${p.value}%` }}
+                      />
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
           <div className="dashboard__notification-list">
             {topics.length === 0 && (
               <p className="dashboard__empty">아직 추가된 문서가 없습니다.</p>

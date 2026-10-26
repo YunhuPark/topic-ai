@@ -228,7 +228,7 @@ function App() {
     }
 
     // 홈: 통계/최근 문서/최근 검색/지식 건강도를 가볍게 훑어보는 화면 (검색은 별도 메뉴)
-    return <Dashboard onSearchTopic={handleSearch} onSyncNow={handleSyncNow} stats={stats} user={user} />;
+    return <Dashboard onSearchTopic={handleSearch} onSyncNow={handleSyncNow} onRefreshStats={fetchStats} stats={stats} user={user} />;
   };
 
   if (!sessionChecked) {
