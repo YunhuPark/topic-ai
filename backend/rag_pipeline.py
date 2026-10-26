@@ -4,6 +4,7 @@ import os
 import re
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 from datetime import datetime, timezone
 from typing import List, Optional
@@ -245,7 +246,8 @@ def content_hash(title: str, content: str) -> str:
     return hashlib.sha256(f"{title}\n{content}".encode("utf-8")).hexdigest()
 
 
-EMBED_BATCH_SIZE = 20  # 진행률을 보여주려고 임베딩을 이 크기로 나눠서 넣는다
+EMBED_BATCH_SIZE = 64   # 임베딩 API 한 번에 보내는 청크 수 (OpenAIDirectEmbeddings.batch_size와 같게)
+EMBED_WORKERS = 4       # 임베딩 API를 동시에 부르는 수 — 저장(Chroma upsert)은 메인 스레드에서 직렬
 
 
 def ingest_documents(
@@ -370,11 +372,27 @@ def ingest_documents(
         total_chunks = len(docs_to_embed)
         if on_progress:
             on_progress(0, total_chunks)
-        for start in range(0, total_chunks, EMBED_BATCH_SIZE):
-            end = start + EMBED_BATCH_SIZE
-            vectorstore.add_documents(docs_to_embed[start:end], ids=ids_to_embed[start:end])
-            if on_progress:
-                on_progress(min(end, total_chunks), total_chunks)
+        # 시간의 대부분은 임베딩 API 대기라서 그 부분만 스레드로 병렬화하고, Chroma 쓰기는 한 곳에서
+        # 순서대로 한다(여러 스레드가 동시에 쓰면 SQLite 잠금 충돌 위험). 같은 id는 upsert라 덮어쓴다.
+        done = 0
+        with ThreadPoolExecutor(max_workers=EMBED_WORKERS) as pool:
+            futures = {}
+            for start in range(0, total_chunks, EMBED_BATCH_SIZE):
+                batch = docs_to_embed[start:start + EMBED_BATCH_SIZE]
+                fut = pool.submit(embeddings.embed_documents, [d.page_content for d in batch])
+                futures[fut] = start
+            for fut in as_completed(futures):
+                start = futures[fut]
+                batch = docs_to_embed[start:start + EMBED_BATCH_SIZE]
+                vectorstore._collection.upsert(
+                    ids=ids_to_embed[start:start + EMBED_BATCH_SIZE],
+                    embeddings=fut.result(),
+                    documents=[d.page_content for d in batch],
+                    metadatas=[d.metadata for d in batch],
+                )
+                done += len(batch)
+                if on_progress:
+                    on_progress(done, total_chunks)
         print(f"문서 {len(embedded_base_ids)}개({len(docs_to_embed)}개 청크)를 새로 임베딩했습니다 "
               f"(변경 없음: {len(source_docs) - len(embedded_base_ids)}개).")
 
@@ -619,12 +637,19 @@ def sync_documents_for_user(provider: str, access_token: str, user_id: Optional[
     try:
         source = PROVIDER_SOURCES.get(provider, provider)
         known = _known_documents(source, user_id)
+        t_fetch = time.monotonic()
         docs, seen_ids = fetcher(access_token, known)
+        fetch_seconds = time.monotonic() - t_fetch
         on_progress = None
         if user_id is not None:
             def on_progress(done, total):
                 _set_sync_status(user_id, provider, phase="embedding", done=done, total=total)
+        t_embed = time.monotonic()
         embedded = ingest_documents(docs, synced_by_user_id=user_id, on_progress=on_progress)
+        print(
+            f"[동기화 소요] provider={provider} 수집 {fetch_seconds:.1f}초({len(docs)}개) "
+            f"+ 임베딩/저장 {time.monotonic() - t_embed:.1f}초({embedded}개)"
+        )
 
         if user_id is not None:
             missing = [doc_id for doc_id in known if doc_id not in seen_ids]

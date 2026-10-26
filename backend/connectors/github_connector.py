@@ -28,7 +28,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 GITHUB_API_BASE = "https://api.github.com"
-GITHUB_LOOKBACK_DAYS = 90
+GITHUB_LOOKBACK_DAYS = 30
 
 
 def _headers(token: Optional[str] = None) -> dict:
@@ -224,7 +224,7 @@ def _repo_to_document(owner: str, repo: str, meta: dict, headers: dict) -> dict:
 
 
 # 저장소 파일 하나당 색인 상한 — 없으면 대형 저장소 하나가 동기화 주기를 통째로 잡아먹는다.
-GITHUB_MAX_FILES_PER_REPO = 500
+GITHUB_MAX_FILES_PER_REPO = 150
 # 본문을 읽기엔 너무 큰 파일(생성된 번들 등) 기준 — 이보다 크면 파일명만 색인한다.
 _MAX_FILE_BYTES = 200_000
 # 내용은 진짜 코드지만 순수 자동 생성물이라 검색 가치가 없는 잠금 파일 — 파일명만 색인한다.
