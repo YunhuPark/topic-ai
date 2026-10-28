@@ -91,7 +91,7 @@ services:
     staticPublishPath: dist
     envVars:
       - key: VITE_API_BASE
-        value: https://topic-thread-backend.onrender.com
+        value: https://topic-thread-ai.duckdns.org  # Oracle VM 백엔드 (deploy/oracle/SETUP.md)
     routes:
       # React Router 없이 클라이언트 사이드 라우팅은 안 쓰지만, 새로고침 시 404 방지용으로 둔다
       - type: rewrite
