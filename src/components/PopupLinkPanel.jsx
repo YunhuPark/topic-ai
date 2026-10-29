@@ -172,7 +172,8 @@ export default function PopupLinkPanel({ provider, displayName, icon, linkedLogi
         <div className="google-link__hint">
           <p className="google-link__hint-title">문서를 가져오는 중이에요</p>
           <ul className="google-link__bullets">
-            <li>양이 많으면 몇 분 걸릴 수 있어요.</li>
+            <li>처음에는 모든 문서를 가져와서 오래 걸려요 (많으면 수십 분).</li>
+            <li>이후에는 바뀐 문서만 가져와 빨라요.</li>
             <li>가져오는 대로 홈 화면의 문서 수가 올라갑니다.</li>
           </ul>
         </div>

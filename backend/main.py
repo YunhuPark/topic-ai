@@ -649,12 +649,43 @@ def get_stats(team_id: Optional[int] = None, authorization: Optional[str] = Head
     열람할 수 있는지는 보는 사람 본인 권한에 달려 있다)."""
     user = _require_user(authorization)
     _require_team_access(team_id, user["id"])
+    # 전체 메타데이터를 훑는 비싼 집계라서(문서가 많고 서버가 작으면 수십 초) 짧게 캐시하고,
+    # 동시에 여러 요청이 와도 한 번만 계산한다(나머지는 기다렸다가 캐시를 쓴다).
+    cache_key = (user["id"], team_id)
+    with _stats_lock:
+        hit = _stats_cache.get(cache_key)
+        if hit and time.monotonic() - hit[0] < STATS_CACHE_TTL_SECONDS:
+            return hit[1]
+        resp = _compute_stats(user["id"], team_id)
+        _stats_cache[cache_key] = (time.monotonic(), resp)
+        return resp
+
+
+STATS_CACHE_TTL_SECONDS = 45
+_stats_cache: dict = {}
+_stats_lock = threading.Lock()
+STATS_BATCH_SIZE = 500  # 메타데이터를 이 크기로 나눠 읽는다(한 번에 전부 올리면 메모리가 폭증)
+
+
+def _iter_metadatas(vectorstore):
+    offset = 0
+    while True:
+        data = vectorstore._collection.get(include=["metadatas"], limit=STATS_BATCH_SIZE, offset=offset)
+        batch = data.get("metadatas") or []
+        if not batch:
+            return
+        yield from batch
+        if len(batch) < STATS_BATCH_SIZE:
+            return
+        offset += STATS_BATCH_SIZE
+
+
+def _compute_stats(user_id: int, team_id: Optional[int]) -> StatsResponse:
     vectorstore = rag_pipeline.get_vectorstore()
-    data = vectorstore._collection.get(include=["metadatas"])
-    metadatas = data.get("metadatas", [])
+    metadatas = _iter_metadatas(vectorstore)
 
     if team_id is None:
-        markers = [f",{user['id']},"]
+        markers = [f",{user_id},"]
     else:
         markers = [f",{m['userId']}," for m in db.get_team_members(team_id)]
     source_counts: dict[str, int] = {}

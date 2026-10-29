@@ -9,6 +9,13 @@ WorkingDirectory=__APP_DIR__/backend
 ExecStart=__APP_DIR__/backend/venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000
 Restart=always
 RestartSec=3
+# 메모리·CPU가 작은 서버에서 동기화가 서버 전체(SSH 포함)를 멈추지 않게 앱만 제한한다
+Nice=10
+CPUWeight=50
+MemoryHigh=640M
+MemoryMax=780M
+OOMScoreAdjust=300
+TimeoutStopSec=30
 
 [Install]
 WantedBy=multi-user.target

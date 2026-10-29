@@ -166,7 +166,7 @@ def project_document_id(project_path: str) -> str:
 
 
 # 프로젝트 하나당 색인할 파일 수 상한 — 없으면 대형 프로젝트 하나가 동기화 주기를 다 잡아먹는다.
-GITLAB_MAX_FILES_PER_PROJECT = 500
+GITLAB_MAX_FILES_PER_PROJECT = int(os.getenv("GITLAB_MAX_FILES_PER_PROJECT", "500"))
 # 본문을 읽기엔 너무 큰 파일(생성된 번들 등) 기준 — 이보다 크면 파일명만 색인한다.
 _MAX_FILE_BYTES = 200_000
 # 내용은 진짜 코드지만 순수 자동 생성물이라 검색 가치가 없는 잠금 파일 — 파일명만 색인한다.
@@ -350,7 +350,7 @@ def _fetch_project_documents(
             to_fetch.append(item)
 
     if to_fetch:
-        with ThreadPoolExecutor(max_workers=min(8, len(to_fetch))) as pool:
+        with ThreadPoolExecutor(max_workers=min(int(os.getenv("CONNECTOR_WORKERS", "3")), len(to_fetch))) as pool:
             futures = {
                 pool.submit(
                     _file_to_document, project_path, project_id, item, default_branch, headers, project_meta

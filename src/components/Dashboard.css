@@ -457,3 +457,8 @@
 @media (prefers-reduced-motion: reduce) {
   .dashboard__progress-fill--indeterminate { animation: none; width: 100%; opacity: 0.5; }
 }
+
+.dashboard__sync-note--first {
+  margin: 0 0 var(--space-3);
+  line-height: 1.5;
+}

@@ -246,8 +246,11 @@ def content_hash(title: str, content: str) -> str:
     return hashlib.sha256(f"{title}\n{content}".encode("utf-8")).hexdigest()
 
 
+# 메타데이터(content)에는 문서 원문을 청크마다 복사해 두는데, 큰 문서가 많으면 저장소가 수 GB로 부풀어
+# 작은 서버가 멈춘다. 표시·요약에 쓰는 본문은 이 길이까지만 저장한다(임베딩/검색은 전체 원문을 청크로 처리).
+META_CONTENT_MAX_CHARS = int(os.getenv("META_CONTENT_MAX_CHARS", "20000"))
 EMBED_BATCH_SIZE = 64   # 임베딩 API 한 번에 보내는 청크 수 (OpenAIDirectEmbeddings.batch_size와 같게)
-EMBED_WORKERS = 4       # 임베딩 API를 동시에 부르는 수 — 저장(Chroma upsert)은 메인 스레드에서 직렬
+EMBED_WORKERS = int(os.getenv("EMBED_WORKERS", "2"))       # 임베딩 API를 동시에 부르는 수 — 저장(Chroma upsert)은 메인 스레드에서 직렬
 
 
 def ingest_documents(
@@ -344,7 +347,7 @@ def ingest_documents(
                 "source": doc['source'],
                 "author": doc['author'],
                 "date": doc['date'],
-                "content": doc['content'],
+                "content": doc['content'][:META_CONTENT_MAX_CHARS],
                 # Chroma 메타데이터는 리스트를 못 담아서 콤마로 join, 조회 시 다시 split
                 "tags": ",".join(doc.get('tags', [])),
                 "sourceUrl": doc.get('sourceUrl', ''),

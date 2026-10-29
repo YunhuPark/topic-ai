@@ -224,7 +224,7 @@ def _repo_to_document(owner: str, repo: str, meta: dict, headers: dict) -> dict:
 
 
 # 저장소 파일 하나당 색인 상한 — 없으면 대형 저장소 하나가 동기화 주기를 통째로 잡아먹는다.
-GITHUB_MAX_FILES_PER_REPO = 500
+GITHUB_MAX_FILES_PER_REPO = int(os.getenv("GITHUB_MAX_FILES_PER_REPO", "500"))
 # 본문을 읽기엔 너무 큰 파일(생성된 번들 등) 기준 — 이보다 크면 파일명만 색인한다.
 _MAX_FILE_BYTES = 200_000
 # 내용은 진짜 코드지만 순수 자동 생성물이라 검색 가치가 없는 잠금 파일 — 파일명만 색인한다.
@@ -352,7 +352,7 @@ def _fetch_repo_documents(
     # 파일마다 blob API를 순차 호출하면 파일 많은 저장소에서 동기화 한 번에 몇 분씩 걸린다 —
     # 권한 확인(main.py._resolve_permissions)과 같은 패턴으로 병렬화한다.
     if to_fetch:
-        with ThreadPoolExecutor(max_workers=min(8, len(to_fetch))) as pool:
+        with ThreadPoolExecutor(max_workers=min(int(os.getenv("CONNECTOR_WORKERS", "3")), len(to_fetch))) as pool:
             futures = {
                 pool.submit(_file_to_document, owner, repo, item, headers, repo_meta): item
                 for item in to_fetch

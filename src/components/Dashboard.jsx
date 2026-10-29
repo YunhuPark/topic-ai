@@ -38,14 +38,21 @@ export default function Dashboard({ onSearchTopic, onSyncNow, onRefreshStats, li
   useEffect(() => {
     if (!watching) return undefined;
     let stopped = false;
+    let statsTicks = 0;
+    let emptyTicks = 0;  // 버튼 직후엔 서버가 아직 시작 전이라 목록이 비어 있을 수 있어 몇 번은 더 기다린다
     const tick = async () => {
       try {
         const data = await apiFetch('/api/v1/sync-status');
         if (stopped) return;
         const items = data?.items ?? [];
         setSyncItems(items);
-        onRefreshStats?.();
-        if (!items.some((i) => i.status === 'running')) setWatching(false);
+        // 통계는 서버에서 비싼 집계라서 진행 조회(2초)마다 부르지 않고 ~20초마다만 새로 고친다
+        statsTicks += 1;
+        const running = items.some((i) => i.status === 'running');
+        if (statsTicks % 10 === 1 || !running) onRefreshStats?.();
+        emptyTicks = items.length === 0 ? emptyTicks + 1 : 0;
+        const idle = items.length === 0 ? emptyTicks >= 8 : !items.some((i) => i.status === 'running');
+        if (idle) setWatching(false);
       } catch {
         if (!stopped) setWatching(false);
       }
@@ -151,6 +158,12 @@ export default function Dashboard({ onSearchTopic, onSyncNow, onRefreshStats, li
             </button>
           </div>
           {syncMessage && <p className="dashboard__sync-note">{syncMessage}</p>}
+          {syncItems.some((i) => i.status === 'running') && (
+            <p className="dashboard__sync-note dashboard__sync-note--first">
+              💡 처음 연동할 때는 모든 문서를 가져오느라 시간이 오래 걸려요(문서가 많으면 수십 분).
+              페이지를 닫아도 서버에서 계속 진행되고, 이후에는 바뀐 문서만 가져와서 훨씬 빨라요.
+            </p>
+          )}
           {syncItems.length > 0 && (
             <ul className="dashboard__sync-list">
               {syncItems.map((item) => {
