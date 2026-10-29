@@ -206,6 +206,9 @@ def _keyword_boost(query: str, title: str, content: str, source_name: str = "") 
     return min(1.0, score / (len(tokens) * 2.0))
 
 
+SEARCH_TITLE_RESCUE_LIMIT = int(os.getenv("SEARCH_TITLE_RESCUE_LIMIT", "60"))
+
+
 def _title_match_candidates(vectorstore, query: str, exclude_base_ids: set[str]) -> list[Document]:
     """벡터 유사도로는 상위 후보(SEARCH_CANDIDATE_POOL)에 아예 못 드는 문서를, 제목이나 본문에
     검색어가 그대로 들어있으면 구제한다. _keyword_boost는 이미 뽑힌 후보 안에서만 재정렬하므로,
@@ -221,19 +224,31 @@ def _title_match_candidates(vectorstore, query: str, exclude_base_ids: set[str])
     query_lower = query.strip().lower()
     if not query_lower:
         return []
-    all_docs = vectorstore._collection.get(include=["metadatas", "documents"])
+    # 컬렉션 전체를 파이썬으로 읽어 훑으면 문서가 수천 개일 때 작은 서버에서 20초 넘게 걸린다.
+    # 그래서 "검색어가 그대로 포함된 청크"만 Chroma(DB) 쪽에서 걸러 가져온다. 임베딩 텍스트에는 제목이
+    # 들어 있어(page_content는 "Title: 제목 + 본문 조각" 형태) 제목/본문 일치를 한 번에 처리한다.
+    # $contains는 대소문자를 구분하므로 입력 그대로와 소문자 두 가지로 조회한다.
+    variants = [query.strip()]
+    if query_lower != variants[0]:
+        variants.append(query_lower)
     matches = []
     seen_base_ids = set()
-    for meta, content in zip(all_docs["metadatas"], all_docs["documents"]):
-        doc_id = meta.get("id")
-        # content가 같은 문서의 모든 청크 행에 전체 원문으로 중복 저장되므로, baseId로
-        # 중복 제거하지 않으면 같은 문서의 청크 행 전부가 매번 구제 후보로 잡힌다.
-        base_id = meta.get("baseId") or doc_id
-        if not doc_id or base_id in exclude_base_ids or base_id in seen_base_ids:
+    for variant in variants:
+        try:
+            found = vectorstore._collection.get(
+                where_document={"$contains": variant},
+                include=["metadatas", "documents"],
+                limit=SEARCH_TITLE_RESCUE_LIMIT,
+            )
+        except Exception as e:
+            print(f"[검색] 제목/본문 일치 조회 실패(건너뜀): {e}")
             continue
-        title_l = (meta.get("title") or "").lower()
-        body_l = (meta.get("content") or "").lower()
-        if query_lower in title_l or query_lower in body_l:
+        for meta, content in zip(found.get("metadatas") or [], found.get("documents") or []):
+            doc_id = (meta or {}).get("id")
+            # content가 같은 문서의 모든 청크 행에 중복 저장되므로 baseId로 중복 제거한다.
+            base_id = meta.get("baseId") or doc_id
+            if not doc_id or base_id in exclude_base_ids or base_id in seen_base_ids:
+                continue
             matches.append(Document(page_content=content, metadata=meta))
             seen_base_ids.add(base_id)
     return matches
