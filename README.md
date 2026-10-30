@@ -284,18 +284,34 @@ python rag_pipeline.py --source gitlab
 있는지는 `backend/.env.example`과 레포 루트의 `.env.example`을 참고(각각 `backend/.env`,
 `.env`로 복사해서 채우면 됨).
 
-### Render로 배포하기
+### 현재 운영 구성
 
-레포 루트의 `render.yaml`(Blueprint)이 백엔드+프론트엔드 정적 사이트를 한 번에 정의해둔다.
-Render 대시보드 → New → **Blueprint** → 이 GitHub 저장소 연결하면 자동으로 두 서비스가
-만들어진다. 주의할 점:
+| 구성 | 위치 | 비고 |
+|------|------|------|
+| 프론트엔드 | Render 정적 사이트 (`render.yaml`, `VITE_API_BASE`) | 무료 |
+| 백엔드 | Oracle Cloud 무료 VM (`VM.Standard.E2.1.Micro`, 1GB) | Caddy(HTTPS) → uvicorn, systemd 서비스 `topic-thread` |
+| 도메인 | `https://topic-thread-ai.duckdns.org` | DuckDNS + Let's Encrypt(Caddy 자동) |
+| 데이터 | VM 디스크 `~/data` (`app.db`, `chroma_db`) | 영구 보존, `DB_PATH`/`CHROMA_PERSIST_DIR`로 지정 |
 
-- **지금은 포트폴리오/데모 단계라 Free 플랜 기준으로 작성해뒀다** — 영구 디스크가 없어서
-  15분 비활동 후 슬립했다 깨어날 때마다 컨테이너가 새로 생성되며 `app.db`/`chroma_db`가
-  초기화된다. 회원가입→연동→검색 자체는 매번 되지만, 미리 쌓아둔 데모 데이터는 유지되지
-  않는다. 실사용(데이터가 계속 유지돼야 함)으로 전환할 때는 `render.yaml` 상단 주석에
-  적어둔 3단계(Starter 플랜 전환 + disk 블록 주석 해제 + `DB_PATH`/`CHROMA_PERSIST_DIR`
-  환경변수 추가)만 하면 된다 — 코드 수정은 이미 끝나 있다.
+- 서버 설치·업데이트: `deploy/oracle/SETUP.md`, `setup.sh`, `update.sh`. 비밀 값은 레포에 없고
+  `deploy/oracle/push-env.ps1`(내 PC에서 실행)로 서버 `.env`에 넣는다. 카카오 키는 `set-kakao.ps1`.
+- **1GB 서버용 제한**(`backend/.env`로 조절): `GITHUB_MAX_FILES_PER_REPO`, `GITLAB_MAX_FILES_PER_PROJECT`,
+  `*_LOOKBACK_DAYS`, `CONNECTOR_WORKERS`, `EMBED_WORKERS`, `MAX_CONCURRENT_SYNCS`(동시 동기화 1개).
+  Chroma 메타데이터에 저장하는 원문은 `META_CONTENT_MAX_CHARS`(기본 20000자)로 잘라 저장한다.
+  서버 사양을 올리면 이 제한들을 풀면 된다.
+- 무료 A1(ARM 최대 24GB)로 옮기려고 서버에서 생성을 반복 시도 중이다 (`deploy/oracle/SETUP-A1-RETRY.md`).
+  자리가 나면 데이터(`~/data`)만 옮기고 DuckDNS IP를 바꾸면 된다.
+- 예전에는 Render Free에 백엔드를 올렸으나 영구 디스크가 없어 데이터가 슬립 때마다 초기화돼서
+  Oracle로 옮겼다(Render 백엔드는 일시정지).
+
+### Render로 배포하기 (프론트엔드, 또는 백엔드 대안)
+
+레포 루트의 `render.yaml`(Blueprint)이 정적 사이트(프론트엔드)를 정의한다.
+Render 대시보드 → New → **Blueprint** → 이 GitHub 저장소 연결하면 만들어진다. 주의할 점:
+
+- Render **Free** 플랜 백엔드는 영구 디스크가 없어서 15분 비활동 후 슬립했다 깨어날 때마다
+  `app.db`/`chroma_db`가 초기화된다. 백엔드를 Render에 올릴 거면 Starter 플랜 + disk +
+  `DB_PATH`/`CHROMA_PERSIST_DIR` 환경변수가 필요하다 — 코드 수정은 이미 끝나 있다.
 - `render.yaml`에 `sync: false`로 표시된 환경변수(API 키·시크릿 등)는 값을 안 적어뒀다 —
   Blueprint 적용 후 Render 대시보드에서 각 서비스의 Environment 탭에 직접 입력해야 한다.
 - 서비스 이름(`topic-thread-backend`/`topic-thread-frontend`)이 이미 다른 사람이 쓰고
@@ -343,9 +359,8 @@ VITE_API_BASE=https://api.example.com npm run build
 - 비밀번호 재설정(SMTP 발신 필요) — 이메일+비밀번호 계정은 여전히 없음, 계정 잠기면 관리자가
   DB에서 직접 처리해야 함. Google/카카오 로그인은 애초에 비밀번호가 없어서 이 문제 자체가
   없음 — 사실상 "비밀번호 잊어버림" 문제의 실질적 해법은 소셜 로그인 쪽으로 유도하는 것
-- Render **Starter 플랜 + 영구 디스크 전환** — 지금은 포트폴리오/데모 단계라 Free 플랜으로
-  두고 있음(데이터가 슬립할 때마다 초기화됨). 실사용 전환 시 `render.yaml` 상단 주석의
-  3단계만 따라가면 됨(코드 변경은 불필요).
+- **더 큰 서버로 이전(무료 A1)** — 지금 1GB 서버라 GitHub/GitLab 파일 수와 조회 기간에 제한을 걸어
+  뒀다. A1 서버가 잡히면 데이터 이전 후 제한을 풀고 전체 재동기화 필요.
 
 ## 향후 연동 계획
 

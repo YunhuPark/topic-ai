@@ -1,0 +1,16 @@
+[Unit]
+Description=Retry launching the free A1 instance until capacity is available
+After=network-online.target
+
+[Service]
+User=ubuntu
+ExecStart=/bin/bash /home/ubuntu/a1-retry.sh
+Restart=on-failure
+RestartSec=120
+# 앱이 쓰는 메모리·CPU를 빼앗지 않게 아주 작게 제한
+Nice=15
+CPUWeight=10
+MemoryMax=220M
+
+[Install]
+WantedBy=multi-user.target
