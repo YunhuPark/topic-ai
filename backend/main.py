@@ -54,8 +54,13 @@ app = FastAPI(
 )
 
 
-SEARCH_CANDIDATE_POOL = 20  # 하이브리드 재정렬을 위해 벡터 유사도만으로 넉넉히 뽑아둘 후보 수
-SEARCH_MAX_RESULTS = 4
+SEARCH_CANDIDATE_POOL = 30  # 하이브리드 재정렬을 위해 벡터 유사도만으로 넉넉히 뽑아둘 후보 수
+# 문서가 수백 개뿐이던 시절엔 4개로도 충분했지만, 지금은 수천 건이 쌓여 있어 같은 주제의
+# 관련 문서가 4개보다 훨씬 많을 수 있다 — 목록에는 더 보여주되, AI 요약에 넣는 문서 수는
+# 따로 더 적게 유지한다(문서를 늘릴수록 LLM 호출 비용·응답 시간이 같이 늘어나기 때문 —
+# 지금 서버가 이미 느린 상황이라 요약 쪽까지 늘리는 건 피한다).
+SEARCH_MAX_RESULTS = 12
+SEARCH_SUMMARY_MAX_DOCS = 4
 
 # similarity_search_with_score만으로는 검색어가 색인된 문서 어디에도 안 맞아도 "그나마 덜 먼"
 # 후보를 억지로 내놓는다 — 이 기준 미만이면 순위/권한 확인 대상에서 아예 제외해서, 진짜 관련
@@ -207,6 +212,12 @@ def _keyword_boost(query: str, title: str, content: str, source_name: str = "") 
 
 
 SEARCH_TITLE_RESCUE_LIMIT = int(os.getenv("SEARCH_TITLE_RESCUE_LIMIT", "60"))
+# Chroma에서 실제로 긁어올 때는 이보다 훨씬 넉넉히 가져온다 — 문서가 수천 건으로 늘어나면서,
+# 검색어가 포함된 청크가 60개 한도보다 훨씬 많아질 수 있는데(예: 같은 CSV의 데이터 행마다
+# 검색어가 반복 등장), Chroma의 반환 순서가 관련도순이 아니라서 정작 제목에 검색어가 그대로
+# 들어간 "진짜" 문서(예: 저장소 이름 자체)가 60개 안에 못 들고 밀려나는 사고가 실제로 있었다.
+# 넉넉히 가져온 뒤 제목 일치를 앞으로 정렬해서 잘라내면, 그런 문서가 밀려날 일이 없다.
+SEARCH_TITLE_RESCUE_FETCH_LIMIT = SEARCH_TITLE_RESCUE_LIMIT * 5
 
 
 def _title_match_candidates(vectorstore, query: str, exclude_base_ids: set[str]) -> list[Document]:
@@ -238,7 +249,7 @@ def _title_match_candidates(vectorstore, query: str, exclude_base_ids: set[str])
             found = vectorstore._collection.get(
                 where_document={"$contains": variant},
                 include=["metadatas", "documents"],
-                limit=SEARCH_TITLE_RESCUE_LIMIT,
+                limit=SEARCH_TITLE_RESCUE_FETCH_LIMIT,
             )
         except Exception as e:
             print(f"[검색] 제목/본문 일치 조회 실패(건너뜀): {e}")
@@ -251,7 +262,31 @@ def _title_match_candidates(vectorstore, query: str, exclude_base_ids: set[str])
                 continue
             matches.append(Document(page_content=content, metadata=meta))
             seen_base_ids.add(base_id)
-    return matches
+
+    # 세 단계 우선순위로 앞에서부터 채운다 — 그래야 SEARCH_TITLE_RESCUE_LIMIT으로 잘라낼 때
+    # 진짜 관련도 높은 문서가 먼저 살아남는다.
+    #   0순위: 저장소/프로젝트 이름 자체에 검색어가 있음 (예: "busan" 검색 → "YunhuPark/busan_02")
+    #   1순위: 제목(파일 경로·이슈 제목 등)에는 있지만 저장소 이름 자체엔 없음
+    #          (예: "team-02-local" 저장소 안의 "busan_festivals.csv" 파일)
+    #   2순위: 제목엔 없고 본문에만 있음
+    # 커넥터들의 제목 형식이 전부 "{owner}/{repo} — ..." 또는 "{owner}/{repo}#{번호} — ..."라서
+    # (github_connector.py 등), " — " 앞부분만 잘라내고 "#" 이전까지가 저장소 식별자다.
+    def _repo_prefix(title: str) -> str:
+        idx = title.find(" — ")
+        prefix = title[:idx] if idx != -1 else title
+        return prefix.split("#", 1)[0]
+
+    def _match_tier(doc: Document) -> int:
+        title_l = (doc.metadata.get("title") or "").lower()
+        repo_l = _repo_prefix(doc.metadata.get("title") or "").lower()
+        if any(v.lower() in repo_l for v in variants):
+            return 0
+        if any(v.lower() in title_l for v in variants):
+            return 1
+        return 2
+
+    matches.sort(key=_match_tier)
+    return matches[:SEARCH_TITLE_RESCUE_LIMIT]
 
 
 def compute_freshness(date_str: str) -> str:
@@ -1174,10 +1209,13 @@ def search_documents(
             # d.page_content는 이 문서가 청킹됐다면 이긴 청크 하나의 슬라이스일 뿐이다 —
             # AI 요약이 문서 전체가 아니라 그 조각만 보는 회귀를 막기 위해, 항상 전체 원문인
             # content로 page_content를 다시 만들어 넣는다.
-            visible_docs.append(Document(
-                page_content=f"Title: {d.metadata.get('title', '')}\n\nContent:\n{content}",
-                metadata=d.metadata,
-            ))
+            # relevant_results는 이미 관련도순으로 정렬돼 있으므로, 목록보다 적은 상한을 걸어도
+            # 요약에는 항상 "그중 가장 관련도 높은 문서들"이 들어간다.
+            if len(visible_docs) < SEARCH_SUMMARY_MAX_DOCS:
+                visible_docs.append(Document(
+                    page_content=f"Title: {d.metadata.get('title', '')}\n\nContent:\n{content}",
+                    metadata=d.metadata,
+                ))
             formatted_docs.append({
                 # baseId 우선 — 프론트가 항상 청크 접미사 없는 안정적인 id를 받게 한다
                 # (summarize-document는 어느 청크 id로 조회해도 content가 전체 원문으로 동일해

@@ -2,8 +2,10 @@ import { useState, useEffect, useRef } from 'react';
 import './SearchBar.css';
 import { getRecentSearches } from '../utils/searchHistory';
 
-export default function SearchBar({ onSearch, isSearching, topics = [] }) {
-  const [query, setQuery] = useState('');
+// query/onQueryChange는 부모(SearchView)가 들고 있다 — 최근 검색어를 눌렀을 때 "검색창에
+// 채우기만 하고 검색은 안 하기"를 하려면, 입력창 밖(홈 화면의 최근 검색 카드 등)에서도 같은
+// 값을 건드릴 수 있어야 하기 때문이다(SearchBar 안에만 있는 로컬 state로는 불가능).
+export default function SearchBar({ query, onQueryChange, onSearch, isSearching, topics = [] }) {
   const [isFocused, setIsFocused] = useState(false);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [recentSearches, setRecentSearches] = useState([]);
@@ -41,8 +43,15 @@ export default function SearchBar({ onSearch, isSearching, topics = [] }) {
     }, 200);
   };
 
-  const handleSuggestionClick = (text) => {
-    setQuery(text);
+  // 최근 검색어는 "검색창에 채우기만" — 바로 검색까지 실행되면 결과를 확인하기도 전에
+  // 화면이 바뀌어버린다는 피드백 반영. 주제 버블(아래)은 원래 하던 대로 클릭 즉시 검색한다.
+  const handleRecentClick = (text) => {
+    onQueryChange(text);
+    setShowSuggestions(false);
+  };
+
+  const handleTopicBubbleClick = (text) => {
+    onQueryChange(text);
     onSearch(text);
     setShowSuggestions(false);
   };
@@ -66,7 +75,7 @@ export default function SearchBar({ onSearch, isSearching, topics = [] }) {
           className="search-bar__input"
           placeholder="주제나 질문을 입력하세요... (예: 'Q3 마케팅 캠페인 관련 문서 모아줘')"
           value={query}
-          onChange={(e) => setQuery(e.target.value)}
+          onChange={(e) => onQueryChange(e.target.value)}
           onFocus={handleFocus}
           onBlur={handleBlur}
           id="main-search-input"
@@ -78,7 +87,7 @@ export default function SearchBar({ onSearch, isSearching, topics = [] }) {
           <button
             type="button"
             className="search-bar__clear"
-            onClick={() => setQuery('')}
+            onClick={() => onQueryChange('')}
           >
             ✕
           </button>
@@ -105,7 +114,7 @@ export default function SearchBar({ onSearch, isSearching, topics = [] }) {
                   // 클릭(click)보다 먼저 닫혀버려 클릭이 씹히는 경우가 있었다 — mousedown에서
                   // 기본 포커스 이동을 막아 입력창이 blur되지 않게 해서 클릭이 항상 먹히게 한다.
                   onMouseDown={(e) => e.preventDefault()}
-                  onClick={() => handleSuggestionClick(item.query)}
+                  onClick={() => handleRecentClick(item.query)}
                 >
                   <span className="search-bar__suggestion-icon">↩</span>
                   <span className="search-bar__suggestion-text">{item.query}</span>
@@ -127,7 +136,7 @@ export default function SearchBar({ onSearch, isSearching, topics = [] }) {
                     key={topic.id}
                     className="search-bar__topic-bubble"
                     onMouseDown={(e) => e.preventDefault()}
-                    onClick={() => handleSuggestionClick(topic.label)}
+                    onClick={() => handleTopicBubbleClick(topic.label)}
                   >
                     {topic.label}
                   </button>
