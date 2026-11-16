@@ -40,6 +40,11 @@ EMBEDDING_MODEL = "text-embedding-3-small"
 # 크게 체감되지 않는다 — 회사 규모로 사용량이 늘어도 비용이 감당 가능한 수준으로 유지된다.
 SUMMARY_MODEL = "gpt-4o-mini"
 OPENAI_TIMEOUT_SECONDS = 60
+# 출력 길이 제한이 없으면 문서가 많을 때 LLM이 장문으로 답하면서 응답 시간이 그만큼 늘어난다
+# (실측 사례: 요약 호출 하나에 39.6초 — 서버 성능과 무관하게 출력 토큰 수에 비례해서 느려짐).
+# keyPoints 3-4개 + decisionTrail/actionItems 몇 개 정도의 JSON은 1200 토큰이면 충분하고 넘치면
+# 어차피 프롬프트가 요구하는 분량을 벗어난 장황한 답이라 자르는 쪽이 낫다.
+SUMMARY_MAX_OUTPUT_TOKENS = 1200
 
 # text-embedding-3-small의 입력 상한은 8191 토큰. tiktoken 없이 정확히 세지 못하므로 넉넉히
 # 잡은 어림치로 자르고, 그래도 상한을 넘으면 아래에서 절반씩 줄여가며 재시도한다.
@@ -877,6 +882,7 @@ def generate_ai_summary(
                 temperature=0,
                 response_format={"type": "json_object"},
                 messages=[{"role": "user", "content": prompt}],
+                max_tokens=SUMMARY_MAX_OUTPUT_TOKENS,
             )
             result = json.loads(completion.choices[0].message.content)
 
