@@ -26,6 +26,22 @@ export default function PopupLinkPanel({ provider, displayName, icon, linkedLogi
   const cleanupRef = useRef(null);
   useEffect(() => () => cleanupRef.current?.(), []);
 
+  // 연동된 상태로 화면을 열었을 때, 이미 백그라운드 자동 재동기화가 실패하고 있었을 수도
+  // 있다(예: Google refresh_token 만료) — 그래도 "연결됨" 배지는 DB에 기록이 있다는 것만
+  // 보고 그냥 초록색으로 뜬다. 열릴 때 한 번 조회해서 조용히 죽어있던 연동을 드러낸다.
+  useEffect(() => {
+    if (!linkedLogin || justLinked) return;
+    let cancelled = false;
+    apiFetch('/api/v1/sync-status')
+      .then((data) => {
+        if (cancelled) return;
+        const mine = data.items.find((item) => item.provider === provider);
+        if (mine) setSyncInfo(mine);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [linkedLogin, provider, justLinked]);
+
   // 연동 성공 직후 /api/v1/sync-status를 짧게 폴링해서 "가져오는 중"이라는 막연한 문구 대신
   // 실제로 몇 개를 가져왔는지/실패했는지 보여준다.
   useEffect(() => {
@@ -124,16 +140,23 @@ export default function PopupLinkPanel({ provider, displayName, icon, linkedLogi
     }
   };
 
+  const hasBackgroundError = syncInfo?.status === 'error';
+
   return (
     <div className="google-link">
       {linkedLogin && (
         <div className="google-link__status-row">
-          <span className="google-link__status">
-            <span className="google-link__status-dot" />
-            {displayName} 연결됨
+          <span className={`google-link__status ${hasBackgroundError ? 'google-link__status--error' : ''}`}>
+            <span className={`google-link__status-dot ${hasBackgroundError ? 'google-link__status-dot--error' : ''}`} />
+            {hasBackgroundError ? `${displayName} 재연동 필요` : `${displayName} 연결됨`}
           </span>
           <span className="google-link__email">{linkedLogin}</span>
         </div>
+      )}
+      {!justLinked && hasBackgroundError && (
+        <p className="google-link__error">
+          자동 동기화가 계속 실패하고 있어요: {syncInfo.error} — 위 버튼으로 다시 연결해주세요.
+        </p>
       )}
       <button className="google-link__button" onClick={handleClick} disabled={loading || unlinking}>
         {loading && <span className="google-link__button-spinner" />}

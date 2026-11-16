@@ -74,6 +74,17 @@
   box-shadow: 0 0 6px rgba(34, 197, 94, 0.5);
 }
 
+/* 화면엔 "연결됨"으로 보여도 저장된 토큰이 죽어서 백그라운드 동기화가 계속 실패 중인
+   상태 — DB에 연동 기록이 있는지만 보면 구분이 안 되므로 별도 색으로 표시한다. */
+.google-link__status--error {
+  color: var(--danger);
+}
+
+.google-link__status-dot--error {
+  background: var(--danger);
+  box-shadow: 0 0 6px rgba(239, 68, 68, 0.5);
+}
+
 .google-link__email {
   font-size: 0.7rem;
   color: var(--text-tertiary);

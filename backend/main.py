@@ -127,6 +127,13 @@ async def _resync_accounts(accounts: list[dict], label: str):
             print(f"[{label}] user_id={user_id} provider={provider} 새 임베딩 {count}개")
         except Exception as e:
             print(f"[{label} 실패] user_id={user_id} provider={provider}: {e}")
+            # Google refresh_token 만료처럼 sync_documents_for_user를 호출하기도 전에 실패하면
+            # 거기 안의 _set_sync_status가 아예 안 돌아서, 화면은 계속 "연결됨"으로만 보이고
+            # 사용자가 알 방법이 없었다 — 어디서 실패했든 여기서 한 번 더 기록해 둔다.
+            rag_pipeline._set_sync_status(
+                user_id, provider, status="error", phase=None, error=str(e),
+                finishedAt=datetime.now(timezone.utc).isoformat(),
+            )
 
 
 async def _auto_resync_loop():
