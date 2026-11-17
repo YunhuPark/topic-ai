@@ -27,4 +27,3 @@ def app_modules(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "langchain_core.documents", docs)
     main = importlib.import_module("main")
     yield main, importlib.import_module("auth"), importlib.import_module("db"), rag
-
