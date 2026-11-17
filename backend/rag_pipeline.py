@@ -21,7 +21,7 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
 
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
-from langchain_community.vectorstores import Chroma
+from local_vectors import SQLiteVectorStore
 from openai import OpenAI, RateLimitError
 
 from dummy_data import mock_documents
@@ -212,12 +212,8 @@ embeddings = OllamaDirectEmbeddings() if llm_backend.is_ollama_backend() else Op
 CHROMA_PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR") or "./chroma_db"
 
 def get_vectorstore():
-    # 저장된 DB가 있으면 불러오고, 없으면 새로 만듭니다.
-    return Chroma(
-        collection_name="topic_documents",
-        embedding_function=embeddings,
-        persist_directory=CHROMA_PERSIST_DIR
-    )
+    return SQLiteVectorStore(CHROMA_PERSIST_DIR, embeddings)
+
 
 def synced_by_set(value: Optional[str]) -> set[str]:
     """syncedBy 메타데이터 문자열(",1,3,")을 사용자 id 집합으로 푼다."""
@@ -305,7 +301,12 @@ def ingest_documents(
             owners.add(str(synced_by_user_id))
 
         digest = content_hash(doc['title'], doc['content'])
-        if prev and prev.get("contentHash") == digest:
+        if prev and prev.get("contentHash") == digest and (
+            doc['source'] != 'gitlab' or (
+                prev.get("permissionVersion") == doc.get("permissionVersion")
+                and prev.get("permissionPath") == doc.get("permissionPath")
+            )
+        ):
             # 내용이 그대로면 임베딩을 다시 하지 않는다 (비용의 대부분이 여기서 절약된다).
             # 다만 다른 사람이 같은 문서를 새로 연동했다면 syncedBy만 갱신해준다 — 청크로
             # 쪼개진 문서라면 모든 형제 청크 행에 반영해야 한다(대표 행만 갱신하면, 통계/검색이
@@ -356,6 +357,8 @@ def ingest_documents(
                 # Chroma 메타데이터는 리스트를 못 담아서 콤마로 join, 조회 시 다시 split
                 "tags": ",".join(doc.get('tags', [])),
                 "sourceUrl": doc.get('sourceUrl', ''),
+                "permissionVersion": doc.get("permissionVersion", 0),
+                "permissionPath": doc.get("permissionPath", ""),
                 "syncedBy": synced,
                 "contentHash": digest,
                 # 원본이 마지막으로 수정된 시각 — 다음 동기화 때 "이 문서는 안 바뀌었으니 본문을
@@ -537,6 +540,8 @@ def _known_documents(source: str, user_id: Optional[int]) -> dict[str, str]:
     marker = str(user_id)
     known = {}
     for meta in got.get("metadatas", []) or []:
+        if source == "gitlab" and (meta or {}).get("permissionVersion") != 1:
+            continue  # Re-fetch legacy project-only ACL documents after upgrade.
         if not meta or marker not in synced_by_set(meta.get("syncedBy")):
             continue
         # baseId 기준으로 모아야 한다 — 커넥터가 돌려주는 seen_ids는 항상 base id뿐이라,

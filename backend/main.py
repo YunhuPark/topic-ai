@@ -776,7 +776,9 @@ def _compute_stats(user_id: int, team_id: Optional[int]) -> StatsResponse:
         # "추천 주제"로 뜨는 게 사용자에게 아무 의미가 없다(전체 문서 수·통계에는 그대로 집계됨,
         # 추천 목록에서만 뺀다).
         tags_str = m.get("tags", "") or ""
-        if "file" not in tags_str.split(","):
+        # Team membership shares aggregate counts, not another member's private
+        # Drive/Slack titles. Only the importing user's topics are listed.
+        if "file" not in tags_str.split(",") and f",{user_id}," in synced_by:
             topics.append({
                 "id": base_id,
                 "label": m.get("title", "문서"),
@@ -866,13 +868,21 @@ def _check_github_access(repo_full_name: str, github_access_token: str) -> str:
         return ACCESS_UNAVAILABLE
 
 
-def _check_gitlab_access(project_path: str, gitlab_access_token: str) -> str:
+def _check_gitlab_access(resource_path: str, gitlab_access_token: str) -> str:
     """이 GitLab 계정(access token 소유자)이 실제로 이 프로젝트에 접근 가능한지 직접 확인한다.
     GitHub와 동일한 패턴 — access token은 링크할 때 서버에 저장해두고 여기서 바로 쓴다."""
     try:
-        project_id = urllib.parse.quote(project_path, safe="")
+        parsed = urllib.parse.urlsplit(resource_path)
+        if parsed.scheme or parsed.netloc or parsed.fragment or not re.fullmatch(
+            r"/projects/[^/?#]+(?:(?:/issues|/merge_requests)/[1-9][0-9]*|/repository/files/[^/?#]+/raw)?",
+            parsed.path,
+        ):
+            return ACCESS_DENIED
+        query = urllib.parse.parse_qs(parsed.query)
+        if parsed.query and (not parsed.path.endswith("/raw") or set(query) != {"ref"}):
+            return ACCESS_DENIED
         resp = http_requests.get(
-            f"{auth.GITLAB_URL}/api/v4/projects/{project_id}",
+            f"{auth.GITLAB_URL}/api/v4{resource_path}",
             headers={"Authorization": f"Bearer {gitlab_access_token}"},
             timeout=10,
         )
@@ -946,7 +956,19 @@ def _resource_of(source: str, metadata: dict) -> Optional[str]:
 
     if source == "gdrive":
         return doc_id[len("gdrive-"):] if doc_id.startswith("gdrive-") else None
-    if source in ("github", "gitlab"):
+    if source == "gitlab":
+        # Legacy indexed content may contain internal notes/README under a
+        # project-only ACL. Deny until the versioned connector reindexes it.
+        if metadata.get("permissionVersion") != 1:
+            return None
+        resource = metadata.get("permissionPath", "")
+        project = urllib.parse.quote(tags[1], safe="") if len(tags) > 1 else ""
+        if not resource or not project or not (
+            resource == f"/projects/{project}" or resource.startswith(f"/projects/{project}/")
+        ):
+            return None
+        return resource
+    if source == "github":
         # 각 커넥터가 tags를 ["github", "owner/repo", kind] 순서로 만들어두는 것에 의존
         return tags[1] if len(tags) > 1 and tags[1] else None
     if source == "slack":

@@ -211,30 +211,54 @@ def get_google_login_authorize_url() -> str:
     return f"https://accounts.google.com/o/oauth2/v2/auth?{params}"
 
 
-def _get_or_create_google_user(email: str) -> int:
-    """이메일이 이미 가입돼 있으면(이메일+비밀번호로 가입했던 계정이라도) 그 계정으로 로그인시킨다
-    — 같은 이메일이면 같은 사람으로 취급. 처음 보는 이메일이면 새로 만드는데, password_hash가
-    NOT NULL이라 비워둘 수 없어서 어떤 실제 비밀번호로도 절대 못 맞는 랜덤 해시를 채워 넣는다
-    (스키마 변경 없이 "비밀번호 로그인 경로를 막는다"는 의도를 표현하는 방법 — bcrypt.checkpw가
-    이 해시와는 무슨 비밀번호를 넣어도 항상 False를 반환한다).
-
-    신규 계정을 만들 때만 _check_signup_domain을 거친다(signup()과 동일한 원칙) — 안 그러면
-    SIGNUP_ALLOWED_DOMAINS를 설정해도 개인 Gmail로 소셜 로그인해서 그냥 우회해버릴 수 있다.
-    이미 만들어진 계정은 나중에 제한이 켜져도 계속 로그인 가능(기존 이메일+비밀번호 로그인과
-    동일한 동작 — signup()에서만 체크하고 login()에서는 안 함)."""
+def _get_or_create_social_user(provider: str, subject: str, email: Optional[str]) -> int:
+    """A provider subject is identity; a claimed email never grants an existing account."""
+    if not isinstance(subject, str) or not subject.strip() or len(subject) > 255:
+        raise AuthError("소셜 계정 식별자가 없습니다.")
+    email = email.strip().lower() if email else None
+    account_email = email or f"{provider}-{subject}@no-email.topicthread.local"
     conn = get_connection()
     try:
-        row = conn.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
-        if row:
-            return row["id"]
-        _check_signup_domain(email)
+        conn.execute("BEGIN IMMEDIATE")
+        identity = conn.execute(
+            "SELECT user_id FROM login_identities WHERE provider = ? AND subject = ?",
+            (provider, subject),
+        ).fetchone()
+        if identity:
+            return identity["user_id"]
+        if conn.execute("SELECT 1 FROM users WHERE lower(email) = ?", (account_email,)).fetchone():
+            raise AuthError(
+                "이 이메일의 기존 계정에는 자동 연결할 수 없습니다. "
+                "기존 로그인 방법을 사용하거나 관리자에게 소유권 확인 복구를 요청하세요."
+            )
+        if email:
+            _check_signup_domain(email)
+        elif _signup_allowed_domains():
+            raise AuthError("도메인 제한이 설정되어 인증된 이메일이 필요합니다.")
         unusable_hash = bcrypt.hashpw(os.urandom(32), bcrypt.gensalt()).decode("utf-8")
         cur = conn.execute(
             "INSERT INTO users (email, password_hash, created_at) VALUES (?, ?, ?)",
-            (email, unusable_hash, datetime.now(timezone.utc).isoformat()),
+            (account_email, unusable_hash, datetime.now(timezone.utc).isoformat()),
+        )
+        user_id = cur.lastrowid
+        conn.execute(
+            "INSERT INTO login_identities (provider, subject, user_id) VALUES (?, ?, ?)",
+            (provider, subject, user_id),
         )
         conn.commit()
-        return cur.lastrowid
+        return user_id
+    finally:
+        conn.close()
+
+
+def _get_or_create_google_user(email: str, subject: str) -> int:
+    return _get_or_create_social_user("google", subject, email)
+
+
+def _account_email(user_id: int) -> str:
+    conn = get_connection()
+    try:
+        return conn.execute("SELECT email FROM users WHERE id = ?", (user_id,)).fetchone()["email"]
     finally:
         conn.close()
 
@@ -275,20 +299,21 @@ def complete_google_login(code: str, state: str) -> dict:
         return {"ok": False, "error": "Google 사용자 정보를 가져오지 못했습니다."}
     info = resp.json()
     email = info.get("email")
-    if not email:
+    if not isinstance(email, str) or not EMAIL_RE.match(email.strip()):
         return {"ok": False, "error": "Google 계정에서 이메일을 가져오지 못했습니다."}
     # Google이 이메일 미인증 계정에도 email 필드를 내려줄 수 있어서 명시적으로 확인한다 —
     # 여기서 자동 가입되는 계정은 비밀번호 검증이 아예 없는 만큼, 최소한 이메일 소유는
     # Google이 보증한 것이어야 한다.
-    if info.get("email_verified") is False:
+    if info.get("email_verified") is not True or not isinstance(info.get("sub"), str) or not info["sub"].strip():
         return {"ok": False, "error": "Google 계정의 이메일이 아직 인증되지 않았습니다."}
     email = email.strip().lower()
 
     try:
-        user_id = _get_or_create_google_user(email)
+        user_id = _get_or_create_google_user(email, str(info["sub"]))
     except AuthError as e:
         return {"ok": False, "error": str(e)}
-    return {"ok": True, "token": _issue_token(user_id, email), "email": email}
+    account_email = _account_email(user_id)
+    return {"ok": True, "token": _issue_token(user_id, account_email), "email": account_email}
 
 
 # ── 카카오 로그인(앱 자체 인증) ─────────────────────────────────────────
@@ -327,53 +352,7 @@ def get_kakao_login_authorize_url() -> str:
 
 
 def _get_or_create_kakao_user(kakao_id: int, email: Optional[str]) -> int:
-    """이 카카오 id로 이미 로그인한 적 있으면(placeholder 이메일로 만들어둔 계정 포함) 그
-    계정을 그대로 쓴다. 처음이면 새로 만드는데, 이번에 진짜 이메일 동의를 받았고 그 이메일로
-    이미 가입된 계정(예: 일반 회원가입)이 있다면 새로 만들지 않고 거기로 합류시킨다 —
-    placeholder 이메일은 다른 가입 경로와 절대 겹치지 않으므로 이 분기는 진짜 이메일을 받은
-    경우에만 의미가 있다.
-
-    신규 계정 생성 시에만 도메인 제한을 적용한다(Google과 동일한 원칙) — 진짜 이메일이 있으면
-    그 도메인을 검사하고, 없으면(placeholder로 갈 상황) 도메인 제한이 켜져 있는 한 아예 거부한다.
-    카카오 개인 계정은 회사 소속을 증명할 방법이 구조적으로 없어서, 이메일 동의조차 못 받은
-    상태로는 "회사 이메일만 가입 가능"이라는 제약을 지킬 수가 없기 때문이다."""
-    placeholder_email = f"kakao-{kakao_id}@no-email.topicthread.local"
-    conn = get_connection()
-    try:
-        row = conn.execute("SELECT id FROM users WHERE email = ?", (placeholder_email,)).fetchone()
-        if row:
-            if email:
-                # placeholder로 가입했던 사람이 이번엔 진짜 이메일 동의를 받았다 —
-                # 화면에 계속 가짜 이메일이 보이지 않도록 승격한다. 그 진짜 이메일을 이미
-                # 다른 계정(예: 일반 회원가입)이 쓰고 있으면 UNIQUE 충돌이 나므로, 그때는
-                # 승격하지 않고 기존 placeholder 그대로 둔다(계정 병합은 범위 밖).
-                clash = conn.execute(
-                    "SELECT id FROM users WHERE email = ? AND id != ?", (email, row["id"])
-                ).fetchone()
-                if not clash:
-                    conn.execute("UPDATE users SET email = ? WHERE id = ?", (email, row["id"]))
-                    conn.commit()
-            return row["id"]
-        if email:
-            row = conn.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
-            if row:
-                return row["id"]
-        if email:
-            _check_signup_domain(email)
-        elif _signup_allowed_domains():
-            raise AuthError(
-                "도메인 제한이 설정된 상태라, 카카오 계정의 이메일 동의가 필요합니다. "
-                "이메일+비밀번호로 가입하거나 Google로 로그인해 주세요."
-            )
-        unusable_hash = bcrypt.hashpw(os.urandom(32), bcrypt.gensalt()).decode("utf-8")
-        cur = conn.execute(
-            "INSERT INTO users (email, password_hash, created_at) VALUES (?, ?, ?)",
-            (email or placeholder_email, unusable_hash, datetime.now(timezone.utc).isoformat()),
-        )
-        conn.commit()
-        return cur.lastrowid
-    finally:
-        conn.close()
+    return _get_or_create_social_user("kakao", str(kakao_id), email)
 
 
 def complete_kakao_login(code: str, state: str) -> dict:
@@ -414,20 +393,20 @@ def complete_kakao_login(code: str, state: str) -> dict:
         return {"ok": False, "error": "카카오 사용자 정보를 가져오지 못했습니다."}
     info = resp.json()
     kakao_id = info.get("id")
-    if not kakao_id:
+    if type(kakao_id) is not int or kakao_id <= 0:
         return {"ok": False, "error": "카카오 계정 식별에 실패했습니다."}
 
     kakao_account = info.get("kakao_account") or {}
     email = kakao_account.get("email")
     # 이메일 동의는 받았지만 인증되지 않은 이메일(드묾)은 신뢰하지 않는다.
-    if email and kakao_account.get("is_email_verified") is False:
+    if email and (not isinstance(email, str) or not EMAIL_RE.match(email.strip()) or kakao_account.get("is_email_verified") is not True or kakao_account.get("is_email_valid") is False):
         email = None
 
     try:
         user_id = _get_or_create_kakao_user(kakao_id, email)
     except AuthError as e:
         return {"ok": False, "error": str(e)}
-    final_email = email or f"kakao-{kakao_id}@no-email.topicthread.local"
+    final_email = _account_email(user_id)
     return {"ok": True, "token": _issue_token(user_id, final_email), "email": final_email}
 
 
