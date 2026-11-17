@@ -42,6 +42,15 @@ def init_db():
             )
         """)
         conn.execute("""
+            CREATE TABLE IF NOT EXISTS login_identities (
+                provider TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                user_id INTEGER NOT NULL REFERENCES users(id),
+                PRIMARY KEY(provider, subject),
+                UNIQUE(provider, user_id)
+            )
+        """)
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS linked_accounts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,

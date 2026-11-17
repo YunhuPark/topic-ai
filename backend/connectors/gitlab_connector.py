@@ -119,7 +119,10 @@ def _list_notes(project_id: str, kind: str, iid: int, since_iso: str, headers: d
     """kind는 'issues' 또는 'merge_requests'. 시스템 자동 생성 노트(라벨 변경 등)는 제외."""
     resource = "issues" if kind == "issue" else "merge_requests"
     notes = _paginate(f"/projects/{project_id}/{resource}/{iid}/notes", {}, headers)
-    return [n for n in notes if not n.get("system") and n.get("created_at", "") >= since_iso]
+    # Internal notes have a narrower ACL than their issue/MR. Never combine
+    # them into a document authorized at the parent resource boundary.
+    return [n for n in notes if not n.get("system") and not n.get("internal")
+            and not n.get("confidential") and n.get("created_at", "") >= since_iso]
 
 
 def _format_entry(author: str, iso_time: str, text: str) -> str:
@@ -149,6 +152,8 @@ def _item_to_document(project_path: str, item: dict, kind: str, notes: list[dict
         "date": date,
         "content": "\n\n".join(lines),
         "tags": ["gitlab", project_path, kind],
+        "permissionVersion": 1,
+        "permissionPath": f"/projects/{urllib.parse.quote(project_path, safe='')}/{'issues' if kind == 'issue' else 'merge_requests'}/{item['iid']}",
         "freshness": "fresh",
         "relevance": 1.0,
         "sourceUrl": item.get("web_url", ""),
@@ -261,6 +266,8 @@ def _file_to_document(
         "date": (updated_at or "")[:10] or "1970-01-01",
         "content": content,
         "tags": ["gitlab", project_path, "file"],
+        "permissionVersion": 1,
+        "permissionPath": f"/projects/{project_id}/repository/files/{urllib.parse.quote(path, safe='')}/raw?{urllib.parse.urlencode({'ref': ref})}",
         "freshness": "fresh",
         "relevance": 1.0,
         "sourceUrl": f"{project_meta.get('web_url', '')}/-/blob/{ref}/{path}",
@@ -296,9 +303,10 @@ def _fetch_project_readme(project_id: str, meta: dict, headers: dict) -> str:
 
 
 def _project_to_document(project_path: str, project_id: str, meta: dict, headers: dict) -> dict:
-    readme = _fetch_project_readme(project_id, meta, headers)
     description = meta.get("description") or ""
-    content = "\n\n".join(part for part in (description, readme) if part) or "(설명 및 README 없음)"
+    # README is already indexed as a repository file with its own permission
+    # check. Project metadata access alone does not grant repository access.
+    content = description or "(프로젝트 설명 없음)"
     updated_at = meta.get("last_activity_at") or ""
     namespace = project_path.split("/")[0]
 
@@ -311,6 +319,8 @@ def _project_to_document(project_path: str, project_id: str, meta: dict, headers
         "date": (updated_at or "")[:10] or "1970-01-01",
         "content": content,
         "tags": ["gitlab", project_path, "project"],
+        "permissionVersion": 1,
+        "permissionPath": f"/projects/{project_id}",
         "freshness": "fresh",
         "relevance": 1.0,
         "sourceUrl": meta.get("web_url", ""),
