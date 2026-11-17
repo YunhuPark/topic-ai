@@ -10,7 +10,7 @@
 ## 구조
 
 ```
-React (Vite) ──fetch──▶ FastAPI (backend/main.py) ──▶ Chroma (로컬 벡터DB)
+React (Vite) ──fetch──▶ FastAPI (backend/main.py) ──▶ SQLite (로컬 벡터 저장소)
                               │                              ▲
                               ▼                              │ 오프라인 배치 적재
                    backend/llm_backend.py (임베딩, 요약)       │
@@ -30,7 +30,7 @@ LLM API를 못 쓰는 환경이면 `ollama`로 바꾸고 회사 내부망에 띄
 `backend/.env.example` 참고.
 
 - 프론트엔드: `src/` — React + Vite
-- 백엔드: `backend/` — FastAPI + LangChain + Chroma
+- 백엔드: `backend/` — FastAPI + LangChain + SQLite
 - 문서 적재는 오프라인 스크립트(`rag_pipeline.py`)로 하고, API 서버와 프로세스가 분리되어 있습니다.
 
 ## 시작하기
@@ -83,8 +83,8 @@ python rag_pipeline.py --source github
 python rag_pipeline.py --source gitlab
 ```
 
-> ⚠️ **적재 후에는 반드시 API 서버(uvicorn)를 재시작하세요.** Chroma는 다른 프로세스가 쓴 내용을
-> 자동으로 다시 읽지 않습니다.
+> SQLite 연결은 다른 worker의 커밋된 변경을 읽습니다. 기존 Chroma 색인은 업그레이드 전에
+> [보안 업그레이드 안내](docs/SECURITY_UPGRADE.md)에 따라 내보내세요.
 
 ## 커넥터 설정
 
@@ -382,7 +382,7 @@ Dropbox/Box, Zoom 녹취록 등은 기존 기능(Drive, Slack)과 역할이 겹�
 
 ## 알려진 운영 이슈
 
-- Chroma는 다른 프로세스가 쓴 내용을 자동으로 다시 읽지 않으므로, 적재 스크립트 실행 후 API 서버를 재시작해야 합니다.
+- 기존 Chroma 색인은 서버와 적재 작업을 멈춘 뒤 먼저 export해야 합니다. 새 저장소는 export하지 않은 기존 색인을 조용히 덮어쓰지 않습니다.
 - Windows 콘솔(cp949)은 이모지를 못 그려서, 로그에 이모지를 쓰면 print 자체가 예외를 던질 수 있습니다 (`main.py`/`rag_pipeline.py` 상단에서 UTF-8로 재설정해 처리 중).
 - Google Drive 커넥터는 Docs/Sheets/Slides/PDF/DOCX/XLSX/PPTX/HWPX를 지원합니다. 스캔 이미지로만 된 PDF, 레거시 `.hwp`, 구버전 MS Office(`.doc`/`.xls`/`.ppt`)는 범위 밖입니다.
 

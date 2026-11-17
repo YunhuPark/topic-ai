@@ -21,7 +21,7 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
 
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
-from langchain_community.vectorstores import Chroma
+from local_vectors import SQLiteVectorStore
 from openai import OpenAI, RateLimitError
 
 from dummy_data import mock_documents
@@ -212,12 +212,8 @@ embeddings = OllamaDirectEmbeddings() if llm_backend.is_ollama_backend() else Op
 CHROMA_PERSIST_DIR = os.getenv("CHROMA_PERSIST_DIR") or "./chroma_db"
 
 def get_vectorstore():
-    # 저장된 DB가 있으면 불러오고, 없으면 새로 만듭니다.
-    return Chroma(
-        collection_name="topic_documents",
-        embedding_function=embeddings,
-        persist_directory=CHROMA_PERSIST_DIR
-    )
+    return SQLiteVectorStore(CHROMA_PERSIST_DIR, embeddings)
+
 
 def synced_by_set(value: Optional[str]) -> set[str]:
     """syncedBy 메타데이터 문자열(",1,3,")을 사용자 id 집합으로 푼다."""

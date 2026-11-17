@@ -179,3 +179,24 @@ def test_changed_repository_ref_rewrites_acl_with_identical_content(real_rag, mo
     monkeypatch.setattr(rag.embeddings, "embed_documents", lambda texts: [[0.0]] * len(texts))
     assert rag.ingest_documents([doc], 1) == 1
     assert writes[0]["permissionPath"].endswith("ref=new")
+
+
+def test_incremental_ingestion_uses_real_local_store_without_reembedding_unchanged_text(real_rag, monkeypatch, tmp_path):
+    rag = real_rag
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-no-provider-calls")
+    monkeypatch.setattr(rag, "CHROMA_PERSIST_DIR", str(tmp_path / "vectors"))
+    embedded = []
+    def embed(texts):
+        embedded.extend(texts)
+        return [[1.0, 0.0] for _ in texts]
+    monkeypatch.setattr(rag.embeddings, "embed_documents", embed)
+    monkeypatch.setattr(rag.embeddings, "embed_query", lambda text: [1.0, 0.0])
+    doc = {"id": "slack-test", "source": "slack", "title": "title", "content": "body",
+           "author": "author", "date": "2026-11-17"}
+    assert rag.ingest_documents([doc], 1) == 1
+    assert rag.ingest_documents([doc], 2) == 0
+    assert len(embedded) == 1
+    store = rag.get_vectorstore()
+    meta = store._collection.get(ids=["slack-test"])["metadatas"][0]
+    assert rag.synced_by_set(meta["syncedBy"]) == {"1", "2"}
+    assert store.similarity_search_with_score("query", k=1)[0][1] == 0

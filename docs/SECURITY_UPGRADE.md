@@ -49,3 +49,41 @@ also used for re-summarization and permission cache keys.
 Team totals remain aggregate counts. Topic titles list only documents imported
 by the viewing user; team membership does not grant access to another member's
 personal source titles. Search still checks original-source access for content.
+
+
+## Remove the vulnerable Chroma runtime
+
+The application now persists vectors in `topic-vectors.sqlite3`, using SQLite and
+NumPy. No vector HTTP API, dynamic embedding plugin, remote model repository,
+trusted-code switch or pickle format is provided. Squared L2 distances match the
+previous default; exact scanning uses memory bounded by one vector plus the top-k
+results, and is intended for this application's local corpus. Very large indexes
+may need a separately reviewed scalable backend.
+
+### Existing index: export BEFORE upgrading
+
+1. Stop the API and all sync/index writers. Back up `app.db` and the entire
+   `CHROMA_PERSIST_DIR` directory. Keep the old trusted virtual environment.
+2. Using that OLD environment (which already has Chroma, NumPy and LangChain), run
+   the new offline tool from the backend directory:
+   `python migrate_vectors.py --directory /absolute/path/to/chroma_db`
+3. The exporter copies existing vectors, documents and metadata including source
+   ACL paths and owner lists. It calls no embedding/model provider. Source data is
+   retained, partial exports are not published, and an existing destination is
+   never overwritten. Writers must remain stopped until export completes.
+4. Create a CLEAN new environment from the updated `requirements.txt`; do not
+   reuse an old environment that retains unlisted vulnerable packages. Then start
+   the API with the same `CHROMA_PERSIST_DIR`. Keep the old backup offline until
+   search and source access are validated. Do not expose the old Chroma server.
+
+A fresh installation needs no export. If a legacy `chroma.sqlite3` is present
+without a completed export, startup of the vector store fails closed with a clear
+migration error; it does not erase the old index, silently start an empty index,
+or regenerate paid embeddings. The one-time exporter imports Chroma only in the
+old offline environment; Chroma is absent from application runtime requirements.
+
+Verification: local store persistence/filters/atomic writes/parallel connections,
+incremental real ingestion and existing auth/ACL tests pass. An actual Chroma
+1.5.9 temporary collection was exported and checked for retained vectors,
+documents, ACL metadata and distances without provider calls. Live production
+index export requires access to that host and is not implied by these tests.
