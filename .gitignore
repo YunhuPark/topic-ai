@@ -34,3 +34,19 @@ backend/app.db
 backend/app.db-shm
 backend/app.db-wal
 *.pyc
+
+# 비밀 정보·로컬 자격 증명 (커밋 금지)
+.env
+.env.*
+!.env.example
+backend/.env
+backend/.env.*
+!backend/.env.example
+venv/
+.venv/
+backend/venv/
+cookies.txt
+*.pem
+*.key
+token*.json
+credentials*.json

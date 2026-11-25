@@ -38,6 +38,12 @@ import auth
 
 db.init_db()
 
+# TOKEN_ENCRYPTION_KEY 가 설정돼 있으면, 예전에 평문으로 저장된 OAuth 토큰을 한 번 암호화한다.
+if os.getenv("TOKEN_ENCRYPTION_KEY"):
+    _migrated = db.migrate_plaintext_tokens()
+    if _migrated:
+        print(f"OAuth 토큰 {_migrated}건을 암호화해 저장했습니다.")
+
 # LLM_BACKEND=ollama로 설정했는데 Ollama 서버가 안 떠 있거나 필요한 모델이 안 받아져 있으면,
 # 검색 요청이 들어올 때 처음 500으로 알게 되는 대신 서버 기동 시점에 바로 알려준다.
 if llm_backend.is_ollama_backend():

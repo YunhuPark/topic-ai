@@ -26,6 +26,7 @@ import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+from urllib.parse import urlparse
 
 import requests
 from docx import Document as DocxDocument
@@ -160,10 +161,55 @@ def _fetch_thread_replies(channel_id: str, thread_ts: str, headers: dict) -> lis
 _MAX_ATTACHMENT_BYTES = 20_000_000
 
 
+# Slack 첨부는 files.slack.com 에서만 내려받는다. Slack API가 준 URL 이라 지금은 안전하지만,
+# 응답이 조작되거나 앞으로 다른 경로로 URL 을 받게 되면 서버가 임의 주소로 요청을 보내는
+# SSRF 통로가 된다 — 그래서 호스트를 고정한다.
+_SLACK_FILE_HOSTS = {"files.slack.com"}
+_MAX_REDIRECTS = 3
+
+
+def _check_slack_file_url(url: str) -> None:
+    parsed = urlparse(url or "")
+    if parsed.scheme != "https" or parsed.hostname not in _SLACK_FILE_HOSTS:
+        raise ValueError(f"허용되지 않은 첨부파일 주소입니다: {parsed.hostname}")
+
+
 def _download_slack_file(url: str, headers: dict) -> bytes:
-    resp = requests.get(url, headers=headers, timeout=30)
-    resp.raise_for_status()
-    return resp.content
+    """호스트를 검증하며 최대 20MB 까지만 스트리밍으로 내려받는다.
+
+    Slack 의 url_private_download 는 files.slack.com 의 서명 URL 로 리다이렉트되므로
+    리다이렉트는 따라가되, 매 이동지의 호스트를 다시 검사한다.
+    """
+    current = url
+    for _ in range(_MAX_REDIRECTS + 1):
+        _check_slack_file_url(current)
+        resp = requests.get(
+            current, headers=headers, timeout=30, stream=True, allow_redirects=False
+        )
+        if resp.is_redirect:
+            location = resp.headers.get("Location", "")
+            resp.close()
+            if not location:
+                raise ValueError("첨부파일 리다이렉트 대상이 없습니다")
+            current = requests.compat.urljoin(current, location)
+            continue
+        with resp:
+            resp.raise_for_status()
+            declared = resp.headers.get("Content-Length")
+            if declared and declared.isdigit() and int(declared) > _MAX_ATTACHMENT_BYTES:
+                raise ValueError("첨부파일이 20MB 를 넘습니다")
+            chunks = []
+            total = 0
+            for chunk in resp.iter_content(chunk_size=64 * 1024):
+                if not chunk:
+                    continue
+                total += len(chunk)
+                if total > _MAX_ATTACHMENT_BYTES:
+                    # Slack이 알려준 크기를 믿지 않고 실제로 받은 바이트로 끊는다
+                    raise ValueError("첨부파일이 20MB 를 넘습니다")
+                chunks.append(chunk)
+        return b"".join(chunks)
+    raise ValueError("첨부파일 리다이렉트가 너무 많습니다")
 
 
 def _extract_file_text(f: dict, headers: dict) -> str:

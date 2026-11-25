@@ -87,3 +87,29 @@ incremental real ingestion and existing auth/ACL tests pass. An actual Chroma
 1.5.9 temporary collection was exported and checked for retained vectors,
 documents, ACL metadata and distances without provider calls. Live production
 index export requires access to that host and is not implied by these tests.
+
+## OAuth tokens at rest (2026-11)
+
+`linked_accounts.access_token` / `refresh_token` are credentials for the user's
+Google Drive, Slack, Notion, GitHub and GitLab accounts. They are now encrypted
+with Fernet when `TOKEN_ENCRYPTION_KEY` is set (`enc()` / `dec()` in `db.py`).
+Rows written before the key existed stay readable (plaintext is passed through)
+and are encrypted automatically on the next startup or the next token update.
+
+Operational notes:
+
+- Generate the key with `Fernet.generate_key()` and keep it out of the repo. If it
+  is lost, stored tokens cannot be decrypted and every link must be reconnected.
+- A malformed key fails loudly instead of silently falling back to plaintext.
+- Without the key the behaviour is unchanged (plaintext), so setting it is the
+  action that actually protects existing installations.
+
+## Known limitation: JWT is kept in localStorage
+
+The browser stores the session JWT in `localStorage` and sends it as
+`Authorization: Bearer`, so a single XSS can exfiltrate a 7-day session. Moving
+the session to an `HttpOnly; Secure; SameSite=Lax` cookie is not done here: it
+changes the auth contract the React app relies on, needs CSRF origin checks on
+state-changing routes, and must be rolled out backend-first with a cookie/Bearer
+transition period. Until that migration, XSS defences (output escaping, CSP) are
+the controls that matter; treat any injected script as a session compromise.

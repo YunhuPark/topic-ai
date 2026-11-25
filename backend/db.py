@@ -20,6 +20,61 @@ from typing import Optional
 DB_PATH = os.getenv("DB_PATH") or os.path.join(os.path.dirname(__file__), "app.db")
 
 
+# ---------------------------------------------------------------------------
+# OAuth 토큰 저장 암호화
+#
+# linked_accounts 의 access_token / refresh_token 은 연결된 외부 계정(Google Drive,
+# Slack, Notion, GitHub, GitLab)에 그대로 접근할 수 있는 자격 증명이다. DB 파일 하나만
+# 유출되면 모든 연동 계정이 열리므로, `TOKEN_ENCRYPTION_KEY`(Fernet.generate_key() 값)가
+# 설정되어 있으면 저장 전에 암호화한다.
+#
+# - 키가 없으면 기존과 같이 평문으로 저장한다(로컬 개발 호환).
+# - 기존 평문 행은 그대로 읽히고(dec 통과), 다음 저장·migrate 때 암호화된다.
+# - 암호문은 "enc:v1:" 접두사로 구분한다.
+# ---------------------------------------------------------------------------
+TOKEN_PREFIX = "enc:v1:"
+
+
+def _get_fernet():
+    key = os.getenv("TOKEN_ENCRYPTION_KEY")
+    if not key:
+        return None
+    try:
+        from cryptography.fernet import Fernet
+    except ImportError:  # cryptography 미설치 → 평문 폴백(경고만)
+        print("[경고] cryptography 가 설치되어 있지 않아 토큰을 평문으로 저장합니다.")
+        return None
+    try:
+        return Fernet(key.strip().encode())
+    except Exception as exc:
+        # 키가 잘못된 경우 조용히 평문으로 떨어지지 않게 명시적으로 실패한다.
+        raise RuntimeError(
+            "TOKEN_ENCRYPTION_KEY 형식이 올바르지 않습니다. Fernet.generate_key() 값을 설정하세요."
+        ) from exc
+
+
+def enc(value: Optional[str]) -> Optional[str]:
+    """저장 직전 호출 — 키가 있으면 암호화한다. 이미 암호문이면 그대로 둔다."""
+    if not value or value.startswith(TOKEN_PREFIX):
+        return value
+    fernet = _get_fernet()
+    if fernet is None:
+        return value
+    return TOKEN_PREFIX + fernet.encrypt(value.encode()).decode()
+
+
+def dec(value: Optional[str]) -> Optional[str]:
+    """읽은 직후 호출 — 암호문이면 복호화하고, 예전 평문 행은 그대로 돌려준다."""
+    if not value or not value.startswith(TOKEN_PREFIX):
+        return value
+    fernet = _get_fernet()
+    if fernet is None:
+        raise RuntimeError(
+            "암호화된 OAuth 토큰을 읽으려면 TOKEN_ENCRYPTION_KEY 가 필요합니다."
+        )
+    return fernet.decrypt(value[len(TOKEN_PREFIX):].encode()).decode()
+
+
 def get_connection() -> sqlite3.Connection:
     # 백그라운드 동기화 스레드와 요청 처리 스레드가 동시에 쓰기 때문에, 기본 5초 대기로는
     # "database is locked"가 검색 500으로 튀어나올 수 있다. WAL + 넉넉한 timeout으로 완화.
@@ -774,7 +829,7 @@ def link_account(
                 linked_at = excluded.linked_at
             """,
             (
-                user_id, provider, provider_email, access_token, refresh_token,
+                user_id, provider, provider_email, enc(access_token), enc(refresh_token),
                 datetime.now(timezone.utc).isoformat(),
             ),
         )
@@ -792,7 +847,7 @@ def get_linked_refresh_token(user_id: int, provider: str) -> Optional[str]:
         ).fetchone()
     finally:
         conn.close()
-    return row["refresh_token"] if row else None
+    return dec(row["refresh_token"]) if row else None
 
 
 def update_tokens(user_id: int, provider: str, access_token: str, refresh_token: Optional[str] = None):
@@ -802,12 +857,12 @@ def update_tokens(user_id: int, provider: str, access_token: str, refresh_token:
         if refresh_token:
             conn.execute(
                 "UPDATE linked_accounts SET access_token = ?, refresh_token = ? WHERE user_id = ? AND provider = ?",
-                (access_token, refresh_token, user_id, provider),
+                (enc(access_token), enc(refresh_token), user_id, provider),
             )
         else:
             conn.execute(
                 "UPDATE linked_accounts SET access_token = ? WHERE user_id = ? AND provider = ?",
-                (access_token, user_id, provider),
+                (enc(access_token), user_id, provider),
             )
         conn.commit()
     finally:
@@ -849,7 +904,7 @@ def get_linked_access_token(user_id: int, provider: str) -> Optional[str]:
         ).fetchone()
     finally:
         conn.close()
-    return row["access_token"] if row else None
+    return dec(row["access_token"]) if row else None
 
 
 def get_all_accounts_with_tokens(providers: list[str]) -> list[dict]:
@@ -870,7 +925,10 @@ def get_all_accounts_with_tokens(providers: list[str]) -> list[dict]:
         ).fetchall()
     finally:
         conn.close()
-    return [dict(r) for r in rows]
+    accounts = [dict(r) for r in rows]
+    for account in accounts:
+        account["access_token"] = dec(account.get("access_token"))
+    return accounts
 
 
 def get_linked_accounts(user_id: int) -> list[dict]:
@@ -883,6 +941,34 @@ def get_linked_accounts(user_id: int) -> list[dict]:
     finally:
         conn.close()
     return [dict(r) for r in rows]
+
+
+def migrate_plaintext_tokens() -> int:
+    """TOKEN_ENCRYPTION_KEY 를 처음 설정한 뒤 한 번 돌리면, 평문으로 남아 있던 기존
+    access_token/refresh_token 을 모두 암호화한다. 서버 기동 시 자동으로 호출된다
+    (이미 암호화된 행은 건드리지 않으므로 매번 돌아도 안전).
+    반환값은 실제로 암호화한 행 수."""
+    if _get_fernet() is None:
+        return 0
+    conn = get_connection()
+    updated = 0
+    try:
+        rows = conn.execute(
+            "SELECT id, access_token, refresh_token FROM linked_accounts"
+        ).fetchall()
+        for row in rows:
+            access, refresh = row["access_token"], row["refresh_token"]
+            new_access, new_refresh = enc(access), enc(refresh)
+            if new_access != access or new_refresh != refresh:
+                conn.execute(
+                    "UPDATE linked_accounts SET access_token = ?, refresh_token = ? WHERE id = ?",
+                    (new_access, new_refresh, row["id"]),
+                )
+                updated += 1
+        conn.commit()
+    finally:
+        conn.close()
+    return updated
 
 
 OAUTH_STATE_TTL_SECONDS = 600  # 연동 팝업은 몇 분 안에 끝나므로 10분이면 충분하다
