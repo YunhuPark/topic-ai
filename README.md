@@ -57,7 +57,12 @@ pip install -r requirements.txt
 ```bash
 OPENAI_API_KEY=sk-...
 JWT_SECRET=아무 랜덤 문자열   # python -c "import secrets; print(secrets.token_hex(32))"
+TOKEN_ENCRYPTION_KEY=Fernet키  # 권장: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
+
+`TOKEN_ENCRYPTION_KEY` 를 설정하면 연동 계정의 OAuth 토큰이 DB 에 암호화되어 저장되고, 서버를
+재시작할 때 기존 평문 토큰이 자동으로 암호화됩니다(키를 잃으면 복호화할 수 없으니 안전하게 보관).
+비워 두면 예전처럼 평문으로 저장됩니다.
 
 서버 실행:
 
